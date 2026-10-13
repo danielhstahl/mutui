@@ -49,21 +49,21 @@ fn cache_for(root: &Path) -> Arc<LibraryCache> {
     cache_with(root, &ScanConfig::default(), false)
 }
 
-/// Keep the tests out of the user's real `$XDG_CACHE_HOME` (the default index
-/// location is derived from it).
-fn isolate_cache_dir() {
-    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("music-tui-index-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("test cache dir");
-        std::env::set_var("XDG_CACHE_HOME", &dir);
-    });
+/// Where a test keeps its index: inside its own temp directory (a dot-directory,
+/// which the scanner prunes, so the index is never part of the library it indexes)
+/// and named after the config fingerprint exactly like the real `$XDG_CACHE_HOME`
+/// file is. Tests never touch the user's cache directory and never mutate the
+/// process environment.
+fn index_file(root: &Path, cfg: &ScanConfig) -> PathBuf {
+    root.join(format!(
+        ".index/{:016x}.bin",
+        library_cache::config_fingerprint(root, cfg)
+    ))
 }
 
 fn cache_with(root: &Path, cfg: &ScanConfig, refresh: bool) -> Arc<LibraryCache> {
-    isolate_cache_dir();
     Arc::new(LibraryCache::open(
-        library_cache::default_cache_file(root, cfg),
+        index_file(root, cfg),
         library_cache::config_fingerprint(root, cfg),
         refresh,
     ))
@@ -271,8 +271,7 @@ fn a_garbage_cache_file_is_ignored_not_fatal() {
     write_library(root);
 
     let cfg = ScanConfig::default();
-    isolate_cache_dir();
-    let file = library_cache::default_cache_file(root, &cfg);
+    let file = index_file(root, &cfg);
     std::fs::create_dir_all(file.parent().expect("parent")).expect("dirs");
     std::fs::write(&file, b"this is not a library cache at all").expect("write garbage");
 
@@ -512,7 +511,7 @@ fn an_unchanged_sync_leaves_the_index_file_untouched() {
     write_library(root);
 
     scan_with_cache(root, cache_for(root));
-    let file = library_cache::default_cache_file(root, &ScanConfig::default());
+    let file = index_file(root, &ScanConfig::default());
     let before = std::fs::metadata(&file).expect("index metadata");
 
     // A periodic sync in a restarted process: nothing changed, so the file must

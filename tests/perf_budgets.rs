@@ -173,20 +173,41 @@ fn a_warm_scan_is_much_cheaper_than_a_cold_one() {
 
     let file = scratch.path().join("index.bin");
     let fingerprint = library_cache::config_fingerprint(library.path(), &ScanConfig::default());
-    let cold = timed_scan(
-        library.path(),
-        std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, false)),
-    );
+    // `refresh = true` => read every tag whatever is on disk; `false` => the warm
+    // path, exactly what a restarted process does.
+    let cold_scan = || {
+        timed_scan(
+            library.path(),
+            std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, true)),
+        )
+    };
+    let warm_scan = || {
+        timed_scan(
+            library.path(),
+            std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, false)),
+        )
+    };
+
+    let mut cold = cold_scan();
     assert_eq!(cold.1.succeeded, files, "cold scan read everything");
     assert_eq!(cold.1.cached, 0);
-
-    // A restart: brand new cache object, same file on disk.
-    let warm = timed_scan(
-        library.path(),
-        std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, false)),
-    );
+    let mut warm = warm_scan();
     assert_eq!(warm.1.cached, files, "warm scan opened no files");
     assert_eq!(warm.1.digest, cold.1.digest, "same rows either way");
+
+    // Two more samples of each, and compare the fastest of each: this is a budget,
+    // not a measurement, and one unlucky sample taken while another process was
+    // busy must not fail the build.
+    for _ in 0..2 {
+        let again = cold_scan();
+        if again.0 < cold.0 {
+            cold = again;
+        }
+        let again = warm_scan();
+        if again.0 < warm.0 {
+            warm = again;
+        }
+    }
     println!(
         "scan of {files} tagged files: cold {:?}, warm {:?} ({} rows served from the index)",
         cold.0, warm.0, warm.1.cached
