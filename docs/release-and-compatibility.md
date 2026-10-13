@@ -59,6 +59,21 @@ test; **mostly** = works with the stated caveat; **no** = not supported.
 If a terminal cannot do mouse reporting, start with `--no-mouse`: the keyboard
 bindings cover everything the mouse can do except dragging the scrollbar.
 
+### Colours
+
+The palette lives in `src/ui/palette.rs` and is tuned for a **black** terminal:
+the accent is a desaturated steel blue `#87AFD7` — 9.1:1 on black — because the
+ANSI `Blue` it replaced is `#0000EE` (2.2:1, unreadable) and `LightBlue` is
+4.4:1 and glaring on a solid thumb. Every text colour is measured with
+`palette::contrast` (WCAG 2.1) and asserted in that module's tests; colour-only
+changes belong in that file and nowhere else.
+
+| Terminal colour support | Result |
+| --- | --- |
+| 24-bit (`COLORTERM=truecolor`) | the palette exactly as designed |
+| 256 colours (`TERM=xterm-256color` &c.) | identical for text: every RGB text colour is an exact 6×6×6 cube entry (`#87AFD7` is index 110), so nothing is dithered; the two tinted backgrounds land on their nearest cube grey |
+| 16 colours (Linux console, `TERM=vt100`) | mostly — most text colours are plain ANSI names and follow the theme, but `ratatui` does not downscale RGB, so the surfaces and the accent are whatever the terminal decides |
+
 ### Character sets
 
 | Locale | Glyphs used |

@@ -1,7 +1,7 @@
 //! The song list: one row per track, only the visible window is rendered.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 use ratatui::Frame;
@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::app::state::{AppState, PlaybackState};
 use crate::model::Track;
 
+use super::palette;
 use super::scroll::Scroll;
 use super::truncate::{clip, clip_pad, pad_left_clip};
 
@@ -154,26 +155,28 @@ pub fn row_line(track: &Track, flags: RowFlags, width: usize) -> Line<'static> {
     if flags.selected {
         line = line.style(
             Style::default()
-                .bg(Color::Rgb(45, 45, 60))
+                .bg(palette::ROW_SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         );
     } else if flags.playing || flags.paused {
-        line = line.style(Style::default().fg(Color::Yellow));
+        line = line.style(Style::default().fg(palette::ROW_PLAYING));
     }
     line
 }
 
 fn marker_style(flags: RowFlags, corrupt: bool) -> Style {
     if corrupt {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(palette::MARKER_CORRUPT)
+            .add_modifier(Modifier::BOLD)
     } else if flags.playing {
         Style::default()
-            .fg(Color::Green)
+            .fg(palette::STATE_PLAYING)
             .add_modifier(Modifier::BOLD)
     } else if flags.paused {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(palette::STATE_PAUSED)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette::MUTED)
     }
 }
 

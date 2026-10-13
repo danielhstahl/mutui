@@ -1,7 +1,7 @@
 //! Top-level render: list pane + scrollbar + footer, plus the help overlay.
 
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::app::state::AppState;
 
+use super::palette;
 use super::{footer, list};
 
 /// Every key binding, also used by `--help`.
@@ -60,8 +61,8 @@ fn draw_scrollbar(frame: &mut Frame, area: Rect, state: &AppState) {
         .end_symbol(None)
         .track_symbol(Some(if state.opts.ascii { "|" } else { "\u{2502}" }))
         .thumb_symbol(if state.opts.ascii { "#" } else { "\u{2588}" })
-        .thumb_style(Style::default().fg(Color::LightBlue))
-        .track_style(Style::default().fg(Color::DarkGray));
+        .thumb_style(Style::default().fg(palette::ACCENT))
+        .track_style(Style::default().fg(palette::MUTED));
     frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
@@ -81,7 +82,7 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &AppState) {
     lines.push(Line::from(""));
     for (key, what) in KEY_BINDINGS {
         lines.push(Line::from(vec![
-            Span::styled(format!("{key:<28}"), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{key:<28}"), Style::default().fg(palette::KEY)),
             Span::raw(*what),
         ]));
     }
@@ -151,6 +152,7 @@ mod tests {
     use super::*;
     use crate::app::state::{Options, PlaybackState};
     use crate::model::{fixture_tracks, sort_tracks};
+    use ratatui::style::Color;
 
     fn state(rows: usize, width: u16, height: u16) -> AppState {
         let mut tracks = fixture_tracks();
@@ -177,6 +179,63 @@ mod tests {
         assert_eq!(lines.len(), 12);
         let joined = lines.join("\n");
         insta::assert_snapshot!(joined);
+    }
+
+    /// `(symbol, foreground)` for every cell: the colour-aware twin of
+    /// `render_lines`, used by the palette tests.
+    fn render_cells(state: &AppState, width: u16, height: u16) -> Vec<(String, Color)> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = match ratatui::Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(err) => match err {},
+        };
+        assert!(terminal.draw(|frame| draw(frame, state)).is_ok());
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| (cell.symbol().to_string(), cell.fg))
+            .collect()
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_is_the_soft_accent_blue() {
+        let app = state(22, 100, 12);
+        let thumbs: Vec<Color> = render_cells(&app, 100, 12)
+            .into_iter()
+            .filter(|(symbol, _)| symbol == "\u{2588}")
+            .map(|(_, fg)| fg)
+            .collect();
+        assert!(!thumbs.is_empty(), "no scrollbar thumb was drawn");
+        assert!(
+            thumbs.iter().all(|fg| *fg == palette::ACCENT),
+            "unexpected thumb colours: {thumbs:?}"
+        );
+        // Solid blocks are the loudest thing on the screen: they have to be the
+        // soft colour, and they still have to be findable on a black terminal.
+        assert!(palette::contrast(palette::ACCENT, Color::Black) >= 4.5);
+        assert!(palette::saturation(palette::ACCENT) < 0.45);
+    }
+
+    #[test]
+    fn nothing_on_screen_is_drawn_in_a_harsh_ansi_blue() {
+        let frames = [
+            (100u16, 12u16, false),
+            (100, 12, true),
+            (60, 8, false),
+            (24, 4, false),
+        ];
+        for (width, height, help) in frames {
+            let mut app = state(20, width, height);
+            app.show_help = help;
+            for (symbol, fg) in render_cells(&app, width, height) {
+                assert!(
+                    !matches!(fg, Color::Blue | Color::LightBlue),
+                    "harsh {fg:?} on {symbol:?} in a {width}x{height} frame (help: {help})"
+                );
+            }
+        }
     }
 
     #[test]

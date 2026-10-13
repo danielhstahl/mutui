@@ -89,6 +89,15 @@ to keep the mouse entirely to the terminal.
 | `r` | rescan the folder |
 | `?` or `F1` | help overlay |
 
+### Colours
+
+The palette is chosen for a black terminal and lives in `src/ui/palette.rs` —
+named by meaning (`ACCENT`, `MUTED`, `STATE_PLAYING`, …) instead of scattered
+`Color::` literals. The accent (scrollbar thumb, footer clock) is a soft steel
+blue `#87AFD7`, 9.1:1 on black; ANSI `Blue` was 2.2:1 and unreadable there.
+Every text colour is checked against WCAG AA by the tests in that module, and
+colour-only changes should touch that file alone.
+
 ### Command line
 
 ```
@@ -191,7 +200,7 @@ src/
   audio/      worker thread, command backend, silent and mock backends
   model/      Track, sort keys, playlist cursor and artist runs
   scan/       recursive scanner (worker threads, streaming progress)
-  ui/         layout, list, scrollbar math, mouse hit-testing, footer, render
+  ui/         layout, list, scrollbar math, mouse hit-testing, footer, palette, render
   terminal.rs raw mode / alternate screen / panic hook / SIGINT
 docs/adr/     the two normative documents the tests check themselves against
 tests/        unit + integration + snapshot + CLI/pty + performance budgets

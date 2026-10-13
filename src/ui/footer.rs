@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::app::state::{AppState, NoticeLevel, Phase, PlaybackState};
 
+use super::palette;
 use super::truncate::clip;
 
 /// One candidate footer segment.
@@ -36,7 +37,11 @@ impl Part {
     }
 }
 
-const STATE_COLORS: (Color, Color, Color) = (Color::Green, Color::Yellow, Color::Cyan);
+const STATE_COLORS: (Color, Color, Color) = (
+    palette::STATE_PLAYING,
+    palette::STATE_PAUSED,
+    palette::STATE_IDLE,
+);
 
 fn state_word(state: &AppState) -> String {
     if state.phase == Phase::Scanning {
@@ -56,7 +61,7 @@ fn state_style(state: &AppState) -> Style {
     let color = match state.playback {
         PlaybackState::Playing { .. } => playing,
         PlaybackState::Paused { .. } => paused,
-        PlaybackState::Stopping => Color::DarkGray,
+        PlaybackState::Stopping => palette::STATE_STOPPING,
         _ => idle,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
@@ -73,9 +78,11 @@ pub fn parts(state: &AppState) -> Vec<Part> {
 
     if let Some(notice) = state.notice.as_ref().filter(|n| n.is_live(state.now)) {
         let style = match notice.level {
-            NoticeLevel::Info => Style::default().fg(Color::White),
-            NoticeLevel::Warning => Style::default().fg(Color::Yellow),
-            NoticeLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            NoticeLevel::Info => Style::default().fg(palette::NOTICE_INFO),
+            NoticeLevel::Warning => Style::default().fg(palette::NOTICE_WARNING),
+            NoticeLevel::Error => Style::default()
+                .fg(palette::NOTICE_ERROR)
+                .add_modifier(Modifier::BOLD),
         };
         parts.push(Part::new(notice.text.clone(), 8, style));
     }
@@ -88,10 +95,10 @@ pub fn parts(state: &AppState) -> Vec<Part> {
         let label = format!("{} - {}", track.display_artist(), track.title);
         let style = if state.playback.is_active() {
             Style::default()
-                .fg(Color::White)
+                .fg(palette::TITLE)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(palette::MUTED)
         };
         parts.push(Part::new(label, 8, style));
     }
@@ -115,7 +122,7 @@ pub fn parts(state: &AppState) -> Vec<Part> {
                 }
             ),
             5,
-            Style::default().fg(Color::Blue),
+            Style::default().fg(palette::ACCENT),
         ));
     }
 
@@ -123,7 +130,7 @@ pub fn parts(state: &AppState) -> Vec<Part> {
         parts.push(Part::new(
             format!("song {position}/{length} for this artist"),
             5,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette::MUTED),
         ));
     }
 
@@ -131,7 +138,7 @@ pub fn parts(state: &AppState) -> Vec<Part> {
         Phase::Scanning => {
             let label = state.scan.label();
             if !label.is_empty() {
-                parts.push(Part::new(label, 8, Style::default().fg(Color::DarkGray)));
+                parts.push(Part::new(label, 8, Style::default().fg(palette::MUTED)));
             }
         }
         Phase::Ready => {
@@ -208,7 +215,7 @@ pub fn compose(parts: &[Part], width: usize, ascii: bool) -> Line<'static> {
 /// Render the footer into `area`.
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let line = compose(&parts(state), usize::from(area.width), state.opts.ascii);
-    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Rgb(25, 25, 32)));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(palette::FOOTER_BG));
     frame.render_widget(paragraph, area);
 }
 
@@ -249,6 +256,27 @@ mod tests {
                 unicode_width::UnicodeWidthStr::width(text.as_str())
             );
         }
+    }
+
+    #[test]
+    fn the_clock_uses_the_soft_accent_blue() {
+        let mut app = state(120);
+        app.phase = crate::app::state::Phase::Ready;
+        app.playlist.select_start(5);
+        app.playback = PlaybackState::Playing {
+            track_id: 1,
+            index: 5,
+        };
+        app.position = std::time::Duration::from_secs(95);
+        let clock = parts(&app)
+            .into_iter()
+            .find(|p| p.text.starts_with("1:35"))
+            .expect("no position part");
+        assert_eq!(clock.style.fg, Some(palette::ACCENT));
+        // The plain ANSI blues are unreadable on black (2.2:1 and 4.4:1).
+        assert_ne!(clock.style.fg, Some(Color::Blue));
+        assert_ne!(clock.style.fg, Some(Color::LightBlue));
+        assert!(palette::contrast(palette::ACCENT, Color::Black) >= 4.5);
     }
 
     #[test]

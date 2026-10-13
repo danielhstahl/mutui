@@ -7,6 +7,19 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
 ## [Unreleased]
 
+### Changed
+
+* **The blue is softer and now readable on a black terminal** (`mutu-eo1`). The
+  footer clock was drawn in ANSI `Blue` — `#0000EE` on the stock palette, 2.2:1
+  against black, i.e. invisible — and the scrollbar thumb in `LightBlue`
+  (4.4:1, fully saturated, and a solid block, which is what read as harsh). Both
+  now use one desaturated steel blue, `#87AFD7`: 9.14:1 on black, 7.61:1 on the
+  footer bar, 5.89:1 on the selected-row background, and exactly xterm-256
+  index 110, so a terminal without 24-bit colour renders it un-dithered. All UI
+  colours moved out of the widgets into `src/ui/palette.rs`, where they are named
+  by meaning, and that module's tests measure WCAG 2.1 contrast so a harsh or
+  illegible colour cannot creep back. No other hue changed.
+
 ### Fixed
 
 * **An artist's albums are now ordered by release year, not by album title**
