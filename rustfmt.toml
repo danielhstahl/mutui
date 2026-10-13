@@ -1,0 +1,4 @@
+# Default (stable) rustfmt settings are used on purpose: `cargo fmt` must behave
+# identically for everyone, and every nightly-only option (imports_granularity,
+# group_imports, ...) would otherwise require a nightly toolchain in CI.
+edition = "2021"

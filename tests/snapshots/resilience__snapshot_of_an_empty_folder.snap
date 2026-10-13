@@ -1,0 +1,18 @@
+---
+source: tests/resilience.rs
+expression: "frame(&app, 72, 14)"
+---
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+                                                                        
+Idle │ No audio files found in /home/user/Music (looked for: mp3, flac,…

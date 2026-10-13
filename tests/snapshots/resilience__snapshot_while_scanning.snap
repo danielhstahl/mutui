@@ -1,0 +1,18 @@
+---
+source: tests/resilience.rs
+expression: "frame(&app, 72, 14)"
+---
+  d- t-  (no artist)        (no album)         untagged-alpha      -   █
+  d- t-  (no artist)        (no album)         untagged-beta      -    █
+  d1 t1  aaron              Singles            aaron-singles      -    █
+  d1 t1  Alpha Beta         Album 1            ab-album1-d1t1      -   █
+  d1 t2  Alpha Beta         Album 1            ab-album1-d1t2      -   █
+  d2 t1  Alpha Beta         Album 1            ab-album1-d2t1      -   █
+                                                                       █
+                                                                       █
+                                                                       █
+                                                                       │
+                                                                       │
+                                                                       │
+                                                                       │
+Scanning │ Scanning… 6/5000 │ [?] help · none

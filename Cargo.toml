@@ -1,0 +1,44 @@
+[package]
+name = "music-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Terminal music player with a folder-based library, mouse scrolling and click-to-play"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "music-tui"
+path = "src/main.rs"
+
+[lib]
+name = "music_tui"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+libc = "0.2"
+lofty = "0.25"
+ratatui = "0.30"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+walkdir = "2.5"
+
+[dev-dependencies]
+criterion = "0.5"
+insta = "1"
+tempfile = "3"
+
+[[bench]]
+name = "sort_and_window"
+path = "benches/sort_and_window.rs"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

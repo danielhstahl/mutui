@@ -1,0 +1,24 @@
+---
+source: tests/resilience.rs
+expression: text
+---
+┌ help ────────────────────────────────────────────────────────────────┐
+│Keys and mouse — wheel or drag the bar on the right to scroll         │
+│                                                                      │
+│click row                   play that song (starts a run for its      │
+│artist)                                                               │
+│wheel                       scroll three rows                         │
+│drag scrollbar              scroll; click the track to jump           │
+│Enter                       play the selected row                     │
+│Space                       pause / resume                            │
+│Up/Down, j/k                move selection                            │
+│PageUp/PageDown             scroll by one page                        │
+│Home / End                  jump to the first / last song             │
+│n / p                       next / previous song inside the artist run│
+│m                           mute / unmute                             │
+│+ / -                       volume up / down                          │
+│r                           rescan the folder                         │
+│? or F1                     toggle this help                          │
+│q, Esc, Ctrl-C              quit                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘

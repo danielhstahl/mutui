@@ -1,0 +1,57 @@
+# Changelog
+
+All notable changes to `music-tui` are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), the project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html), and the sort and
+playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
+
+## [0.1.0]
+
+First release. Implements the epic `mutu-2h8`.
+
+### Added
+
+* Recursive folder scanner on worker threads: streams rows while it walks, reads
+  tags with `lofty`, respects `--max-files` / `--max-entries`, skips hidden
+  trees, reports unreadable files instead of failing, and is cancellable.
+* Total-order sort: artist (album artist first) → album → disc → track → year →
+  file name → path, with natural number ordering and `u32::MAX` for missing
+  track numbers. Normative spec plus a 22-row worked example in ADR 0002, and a
+  test that parses the markdown table and compares it with the comparator.
+* Playlist model with an explicit cursor and artist-run boundaries
+  (`run`, `advance`, `prev`, `at_run_end`, re-anchoring after a rescan).
+* Click-to-play with auto-advance limited to the clicked artist's run, plus the
+  `End of artist: <name>` footer message; stale `Finished` events are dropped,
+  corrupt files are skipped once, and two consecutive failures stop the run.
+* Single scrollable list pane with one row per song, selection and playing
+  markers, corrupt-file marker, and windowed rendering whose cost is
+  independent of library size.
+* Scrollbar (proportional thumb, wheel, drag, track click) and clamped offset
+  math shared by mouse and keyboard.
+* Audio worker thread with three backends: external command players
+  (`mpv`, `ffplay`, `mpg123`, `mpg321`, `madplay`, `afplay`, `mplayer`),
+  a silent simulated backend, and a mock backend for tests.
+* Keyboard parity: quit, play, pause/resume, navigation, page scroll, jump to
+  first/last, next/previous inside the run, mute, volume, rescan, help overlay.
+* Footer status line: state, now playing, position/duration, run position,
+  library count, active backend and the latest error or notice.
+* Terminal lifecycle: raw mode + alternate screen + mouse capture, panic hook
+  that restores the screen, `SIGINT` handling, guaranteed restore on quit.
+* File-only diagnostics with typed errors and documented exit codes
+  (`2` usage/folder, `3` not a terminal, `4` terminal failure).
+* CLI: required folder argument with validation, `--extensions`,
+  `--scan-threads`, `--max-files`, `--max-entries`, `--wheel-rows`,
+  `--backend`, `--ascii`, `--no-mouse`, `--log-file`, `--debug`, `--dump-sort`.
+* Test suite (~150 tests) that needs no speakers and no TTY: unit tests, ADR
+  consistency tests, scanner fixtures on synthetic WAV/MP3/FLAC files,
+  headless event-loop tests against a real audio worker, snapshot tests of the
+  rendered screen, CLI tests including a pty run, and hard performance budgets.
+* `cargo bench` benchmarks for sorting and frame rendering.
+
+### Known limitations
+
+* Pause/resume depends on `SIGSTOP`/`SIGCONT`, so it is unavailable when a native
+  Windows player is used (the app reports the refusal instead of guessing).
+* No gapless playback and no seeking from the UI (the backend supports `Seek`,
+  the key binding is not exposed yet).
+* Playlists are per run: there is no persistent queue file and no M3U import.
