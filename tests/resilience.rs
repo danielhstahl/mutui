@@ -512,8 +512,13 @@ fn scan_tracks(dir: &Path) -> Vec<Track> {
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     music_tui::scan::scan(dir, &music_tui::scan::ScanConfig::default(), &tx, &cancel);
     let mut tracks = Vec::new();
-    while let Ok(ScanMessage::Track(track)) = rx.recv() {
-        tracks.push(track);
+    while let Ok(message) = rx.recv() {
+        match message {
+            ScanMessage::Track(track) => tracks.push(track),
+            // `Progress` may arrive anywhere in the stream; `Done` ends it.
+            ScanMessage::Done(_) => break,
+            ScanMessage::Progress(_) => {}
+        }
     }
     sort_tracks(&mut tracks);
     tracks

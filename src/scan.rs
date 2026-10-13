@@ -403,9 +403,14 @@ pub fn scan(
         succeeded: AtomicUsize::new(0),
         cached: AtomicUsize::new(0),
         failed: Mutex::new(Vec::new()),
+        // Seeded with *now*, not zero: `now_ms` counts from process start, so a
+        // zero here would make the very first `report_progress` call pass its
+        // throttle and put a `Progress` message in front of the first `Track`.
+        // Consumers that read "until the first non-Track message" would then see
+        // an empty library, and a scan of a small folder is exactly that case.
         last_progress: AtomicU64::new(
             LastProgress {
-                last_ms: 0,
+                last_ms: crate::app::time::now_ms(),
                 tagged: 0,
             }
             .pack(),

@@ -65,6 +65,57 @@ fn paths(tracks: &[Track]) -> Vec<String> {
 }
 
 #[test]
+fn the_first_message_of_a_scan_is_a_row_not_progress() {
+    let dir = library();
+    let (tx, rx) = mpsc::channel();
+    let cancel = new_cancel();
+    let root = dir.path().to_path_buf();
+    let config = ScanConfig::default();
+    // Starve the scanner while it runs: the race this guards is the *walker*
+    // getting ahead of the tagging workers and emitting the (throttled) progress
+    // message before the first row, which only shows up when the machine is busy.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let burners: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || while !stop.load(Ordering::Relaxed) {})
+        })
+        .collect();
+    let report = scan::scan(&root, &config, &tx, &cancel);
+    stop.store(true, Ordering::Relaxed);
+    for burner in burners {
+        let _joined = burner.join();
+    }
+    drop(tx);
+
+    // A folder this small is tagged inside the progress throttle window, so the
+    // stream may contain nothing but rows first. The throttle used to be seeded
+    // with "never sent", which let a `Progress` message jump ahead of the first
+    // row — and a reader that stops at the first message that is not a row then
+    // saw an empty library (this is what made three headless tests report no
+    // plays at all, on a busy runner only).
+    let first = rx.recv().expect("a scan sends something");
+    assert!(
+        matches!(first, ScanMessage::Track(_)),
+        "the first message of a scan must be a row, got {first:?}"
+    );
+
+    let mut rows = 1usize;
+    let mut done = None;
+    while let Ok(message) = rx.recv() {
+        match message {
+            ScanMessage::Track(_) => rows += 1,
+            ScanMessage::Progress(_) => {}
+            ScanMessage::Done(report) => done = Some(report),
+        }
+    }
+    let done = done.expect("exactly one Done per scan");
+    assert!(report.scanned > 0, "the fixture folder has audio");
+    assert_eq!(rows, report.scanned, "one row per audio file");
+    assert_eq!(done.scanned, report.scanned);
+}
+
+#[test]
 fn one_row_per_audio_file_with_correct_tags() {
     let dir = library();
     let (tracks, report) = collect(dir.path(), &ScanConfig::default());

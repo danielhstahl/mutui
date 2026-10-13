@@ -51,6 +51,20 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
 ### Fixed
 
+* **A scan can no longer put a progress message ahead of the first row.** The
+  progress throttle was seeded with "never sent", so its very first call always
+  passed the gate; whenever the walker won the race against the tagging workers —
+  which is what CPU starvation on a busy runner does — that first `Progress`
+  landed in front of every `Track`, and a consumer that stops reading at the first
+  message that is not a row then saw an *empty library*. Three test helpers did
+  exactly that, which is why `rapid_clicks_leave_exactly_one_track_playing` and
+  `stale_finished_event_from_the_worker_is_ignored` reported "no plays at all" on
+  GitHub Actions but never locally. The throttle is now seeded with the start of
+  the scan, so the first progress tick waits for `PROGRESS_INTERVAL` to have
+  actually elapsed (which is when progress reporting starts to say something), the
+  helpers read a scan in any order (`Done` ends the stream, `Progress` is
+  ignored), and `tests/scan_fixtures.rs::the_first_message_of_a_scan_is_a_row_not_progress`
+  pins the contract.
 * **Rescanning (`r`) no longer duplicates the library.** The streamed rows were
   appended to the rows already on screen and everything was re-sorted together,
   so a rescan of an unchanged folder showed the library twice (and moved the

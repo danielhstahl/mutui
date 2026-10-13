@@ -37,8 +37,13 @@ fn library(dir: &Path) -> Vec<Track> {
     let report = scan::scan(dir, &ScanConfig::default(), &tx, &cancel);
     assert_eq!(report.scanned, 4, "{report:?}");
     let mut tracks = Vec::new();
-    while let Ok(ScanMessage::Track(track)) = rx.recv() {
-        tracks.push(track);
+    while let Ok(message) = rx.recv() {
+        match message {
+            ScanMessage::Track(track) => tracks.push(track),
+            // `Progress` may arrive anywhere in the stream; `Done` ends it.
+            ScanMessage::Done(_) => break,
+            ScanMessage::Progress(_) => {}
+        }
     }
     music_tui::model::sort_tracks(&mut tracks);
     tracks
