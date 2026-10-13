@@ -26,7 +26,7 @@ pub const KEY_BINDINGS: &[(&str, &str)] = &[
     ("n / p", "next / previous song inside the artist run"),
     ("m", "mute / unmute"),
     ("+ / -", "volume up / down"),
-    ("r", "rescan the folder"),
+    ("r / R", "rescan (shift-R re-reads every tag)"),
     ("? or F1", "toggle this help"),
     ("q, Esc, Ctrl-C", "quit"),
 ];

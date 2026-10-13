@@ -17,6 +17,7 @@ use crate::audio::{
 };
 use crate::cli::{self, Cli};
 use crate::error::{Error, Result};
+use crate::library_cache::{self, LibraryCache};
 use crate::model::{dump_sorted_order, sort_tracks, Track};
 use crate::scan::{self, ScanConfig, ScanMessage};
 use crate::terminal::{self, TerminalGuard};
@@ -92,8 +93,16 @@ impl ScanJob {
     }
 
     /// Cancel the running scan (if any) and start a fresh one.
-    pub fn restart(&mut self) {
+    ///
+    /// `force` (the `R` binding) makes the new scan ignore the library index and
+    /// re-read every tag, then write the index again.
+    pub fn restart(&mut self, force: bool) {
         self.cancel.store(true, Ordering::SeqCst);
+        if force {
+            if let Some(cache) = &self.config.cache {
+                cache.force_full_scan();
+            }
+        }
         let (tx, rx) = mpsc::channel();
         self.cancel = Arc::new(AtomicBool::new(false));
         spawn_scan(&self.folder, &self.config, &tx, &self.cancel);
@@ -121,6 +130,27 @@ fn spawn_scan(
     let _handle = std::thread::spawn(move || {
         scan::scan(&folder, &config, &tx, &cancel);
     });
+}
+
+/// Build the library index for `folder` from the command line flags.
+///
+/// `--no-cache` returns a cache that never reads or writes, `--refresh` loads
+/// nothing but writes the index back afterwards, and `--cache-file` overrides the
+/// default `$XDG_CACHE_HOME/music-tui/…` location.
+#[must_use]
+pub fn make_cache(cli: &Cli, folder: &Path, config: &ScanConfig) -> Arc<LibraryCache> {
+    if cli.no_cache {
+        return Arc::new(LibraryCache::disabled());
+    }
+    let file = cli
+        .cache_file
+        .clone()
+        .unwrap_or_else(|| library_cache::default_cache_file(folder, config));
+    Arc::new(LibraryCache::open(
+        file,
+        library_cache::config_fingerprint(folder, config),
+        cli.refresh,
+    ))
 }
 
 /// Scan synchronously and return the sorted library (used by `--dump-sort`).
@@ -168,12 +198,16 @@ pub fn run(cli: &Cli, folder: PathBuf, log_path: &Path) -> Result<()> {
         wheel_rows: cli.wheel_rows,
         ascii: cli.ascii || !terminal::supports_unicode(),
         debug_footer: cli.debug,
+        sync_interval: cli.sync_interval(),
     });
     if let Some(text) = warning {
         state.notice = Some(Notice::warn(text, state.now));
     }
 
-    let mut scan_job = ScanJob::start(folder, cli.scan_config());
+    let mut scan_config = cli.scan_config();
+    let cache = make_cache(cli, &folder, &scan_config);
+    scan_config.cache = Some(cache);
+    let mut scan_job = ScanJob::start(folder, scan_config);
     let player = PlayerHandle::spawn(backend);
 
     let outcome = {
@@ -193,7 +227,7 @@ fn session(state: &mut AppState, player: &PlayerHandle, scan_job: &mut ScanJob) 
     let clock = SystemClock;
     // Clone the receiving end so `on_rescan` can own `&mut scan_job`.
     let rx = Arc::clone(&scan_job.rx);
-    let mut on_rescan = || scan_job.restart();
+    let mut on_rescan = |force: bool| scan_job.restart(force);
     run_loop(
         state,
         player,
@@ -215,7 +249,7 @@ pub fn run_headless(
     input: &mut dyn InputSource,
     drawer: &mut dyn Drawer,
     clock: &dyn Clock,
-    on_rescan: &mut dyn FnMut(),
+    on_rescan: &mut dyn FnMut(bool),
     max_iterations: Option<usize>,
 ) -> Result<()> {
     run_loop(

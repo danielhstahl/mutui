@@ -346,3 +346,119 @@ fn strip_ansi(input: &str) -> String {
     }
     out
 }
+
+/// The footer's library count in a captured screen (the last `N songs` wins,
+/// because the footer is redrawn while the scan fills in). A pty writes cells, so
+/// the space between the number and the word may not survive: skip whitespace.
+fn song_count(visible: &str) -> Option<usize> {
+    let at = visible.rfind("songs")?;
+    let digits: String = visible[..at]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
+/// Run the real UI inside a pty for `pause_ms`, quit it with `q`, and return the
+/// screen with the escape sequences removed. Returns `String::new()` when `script`
+/// is not installed (the test that uses it then reports no count and is skipped).
+fn screen_in_pty(folder: &Path, extra: &[&str], pause_ms: u64, tag: &str) -> String {
+    let stem = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "x".to_string());
+    let typescript = std::env::temp_dir().join(format!(
+        "music-tui-pty-{}-{}-{}.log",
+        std::process::id(),
+        stem,
+        tag
+    ));
+    let log =
+        std::env::temp_dir().join(format!("music-tui-pty-{}-{}.log", std::process::id(), tag));
+    let mut inner = format!(
+        "stty rows 24 cols 80; {} --backend silent --log-file {}",
+        env!("CARGO_BIN_EXE_music-tui"),
+        log.display()
+    );
+    for arg in extra {
+        inner.push(' ');
+        inner.push_str(arg);
+    }
+    inner.push(' ');
+    inner.push_str(&folder.display().to_string());
+    let mut child = Command::new("script")
+        .args(["-q", "-e", "-c", &inner, typescript.to_str().expect("utf8")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let child = match child.as_mut() {
+        Ok(child) => child,
+        Err(_) => return String::new(),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+    if let Some(mut stdin) = child.stdin.take() {
+        let _write = stdin.write_all(b"q");
+        let _flush = stdin.flush();
+    }
+    let _status = child.wait().expect("script must finish");
+    let capture = std::fs::read_to_string(&typescript).unwrap_or_default();
+    let _remove = std::fs::remove_file(&typescript);
+    strip_ansi(&capture)
+}
+
+/// A library with no deliberately-broken file, so the footer shows the library
+/// count instead of a warning.
+fn clean_library() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    music_tui::testing::FixtureSet::new(dir.path())
+        .song("alpha/one.wav", "One", "Alpha Beta", "Album 1", 1, 1, 1998)
+        .song("alpha/two.wav", "Two", "Alpha Beta", "Album 1", 1, 2, 1998)
+        .song("beta/one.wav", "One", "Beta Wave", "Double", 1, 1, 1994)
+        .song("beta/two.wav", "Two", "Beta Wave", "Double", 1, 2, 1994)
+        .write_all()
+        .expect("fixtures");
+    dir
+}
+
+#[test]
+fn cold_start_background_syncs_and_warm_start_all_show_one_library() {
+    let dir = clean_library();
+    let cache =
+        std::env::temp_dir().join(format!("music-tui-pty-index-{}.bin", std::process::id()));
+    let _cleanup = CopyCleanup(cache.clone());
+    let cache_arg = cache.to_str().expect("utf8 cache path");
+    let folder = dir.path();
+
+    // First start: no index yet, it is written by this run.
+    let cold = screen_in_pty(folder, &["--cache-file", cache_arg], 1_500, "cold");
+    if cold.is_empty() {
+        return; // `script` is not installed here.
+    }
+    assert!(cache.exists(), "the first run must write the index");
+    assert!(
+        !cold.contains("music-tui:") && !cold.contains("panicked"),
+        "diagnostics must never reach the screen: {cold}"
+    );
+    let cold_count = song_count(&cold).expect("footer shows a library count");
+    assert!(cold_count > 0, "the folder has audio: {cold}");
+
+    // Second start, warm index, and a background sync every second: three syncs
+    // of an unchanged folder must not add a single row.
+    let warm = screen_in_pty(
+        folder,
+        &["--cache-file", cache_arg, "--sync-interval", "1"],
+        3_500,
+        "warm",
+    );
+    let warm_count = song_count(&warm).expect("footer shows a library count");
+    assert_eq!(
+        cold_count, warm_count,
+        "an indexed start and three background syncs must show exactly the same library"
+    );
+}

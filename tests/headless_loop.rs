@@ -100,7 +100,7 @@ fn run(
     max_iterations: Option<usize>,
 ) -> Result<()> {
     let rx = empty_scan_receiver();
-    let mut no_rescan = || {};
+    let mut no_rescan = |_force| {};
     music_tui::run::run_headless(
         app,
         player,
@@ -319,7 +319,7 @@ fn first_frames_are_drawn_before_the_scan_finishes() {
     let mut input = ScriptedInput::new([resize(60, 14), wait(150), key(KeyCode::Char('q'))]);
     let mut drawer = drawer60();
     let rx = Arc::clone(&scan_job.rx);
-    let mut no_rescan = || {};
+    let mut no_rescan = |_force| {};
     music_tui::run::run_headless(
         &mut app,
         &player,
@@ -442,5 +442,55 @@ fn quit_effects_are_ordered_stop_then_quit() {
     assert_eq!(
         effects,
         vec![Effect::Command(PlayerCommand::Stop), Effect::Quit]
+    );
+}
+
+#[test]
+fn periodic_syncs_and_shift_r_reach_the_scan_job_through_the_loop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = state_with(library(dir.path()), "null");
+    app.opts.sync_interval = Duration::from_secs(60);
+    let player = PlayerHandle::spawn(Box::new(NullBackend::new()));
+    let rx = empty_scan_receiver();
+
+    // One `Wait(0)` is one loop iteration, and the fake clock advances one tick
+    // per iteration, so 1_300 of them are 65 virtual seconds without any real
+    // sleeping: enough for exactly one periodic sync.
+    let mut input = ScriptedInput::new(
+        [resize(60, 14)]
+            .into_iter()
+            .chain((0..1_300).map(|_| wait(0)))
+            .chain([key(KeyCode::Char('R')), key(KeyCode::Char('q'))]),
+    );
+    let mut drawer = drawer60();
+    let clock = FakeClock::new(0);
+    let rescans: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&rescans);
+    let mut on_rescan = move |force: bool| {
+        if let Ok(mut guard) = log.lock() {
+            guard.push(force);
+        }
+    };
+    music_tui::run::run_headless(
+        &mut app,
+        &player,
+        &rx,
+        &mut input,
+        &mut drawer,
+        &clock,
+        &mut on_rescan,
+        None,
+    )
+    .expect("loop");
+    player.shutdown();
+    assert_eq!(
+        *rescans.lock().expect("log"),
+        vec![false, true],
+        "one periodic sync, then the forced rescan from shift-R"
+    );
+    assert!(
+        app.last_scan_ms >= 60_000,
+        "the sync stamped the clock: {}",
+        app.last_scan_ms
     );
 }

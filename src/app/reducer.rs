@@ -5,11 +5,14 @@
 //! loop delivers, which is what makes the whole click-to-play/auto-advance
 //! behaviour testable with a scripted input and a fake clock.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 
 use crate::audio::{PlayerCommand, PlayerEvent};
-use crate::model::RunEnded;
-use crate::scan::ScanMessage;
+use crate::model::{sort_tracks, RunEnded};
+use crate::scan::{ScanMessage, ScanReport};
 use crate::ui::mouse::{hit_test, HitContext, MouseAction};
 
 use super::state::{AppState, Notice, Phase, PlaybackState, ScanStatus};
@@ -65,7 +68,7 @@ pub enum Effect {
 pub fn reduce(state: &mut AppState, msg: Msg, now: u64) -> Vec<Effect> {
     state.now = now;
     let is_tick = matches!(msg, Msg::Tick);
-    let effects = match msg {
+    let mut effects = match msg {
         Msg::Key(key) => reduce_key(state, key, now),
         Msg::Mouse(event) => reduce_mouse(state, event, now),
         Msg::Player(event) => reduce_player(state, event, now),
@@ -77,10 +80,34 @@ pub fn reduce(state: &mut AppState, msg: Msg, now: u64) -> Vec<Effect> {
             return quit(state);
         }
     };
+    if is_tick {
+        effects.extend(periodic_sync(state));
+    }
     if !is_tick {
         state.dirty = true;
     }
     effects
+}
+
+/// Background library sync (`--sync-interval`).
+///
+/// This is cheap *because* of the library index: a sync that finds nothing new
+/// costs one `stat` per file, no tag reading, no re-sort and no rows moving
+/// under the cursor. It is skipped while a scan is in flight (syncs must never
+/// stack) and while the user is dragging the scrollbar.
+fn periodic_sync(state: &mut AppState) -> Vec<Effect> {
+    let interval = state.opts.sync_interval;
+    if interval.is_zero() || state.phase != Phase::Ready || state.dragging {
+        return Vec::new();
+    }
+    let since = state.now.saturating_sub(state.last_scan_ms);
+    if since < u64::try_from(interval.as_millis()).unwrap_or(u64::MAX) {
+        return Vec::new();
+    }
+    // `start_rescan` stamps `last_scan_ms`, so a slow scan cannot make every
+    // following tick fire.
+    tracing::debug!(now = state.now, "periodic library sync");
+    start_rescan(state)
 }
 
 fn quit(state: &mut AppState) -> Vec<Effect> {
@@ -108,71 +135,147 @@ fn expire_notices(state: &mut AppState, now: u64) -> Vec<Effect> {
 // scanning
 // ---------------------------------------------------------------------------
 
-fn reduce_scan(state: &mut AppState, message: ScanMessage, now: u64) -> Vec<Effect> {
+fn reduce_scan(state: &mut AppState, message: ScanMessage, _now: u64) -> Vec<Effect> {
     match message {
         ScanMessage::Track(track) => {
-            state.playlist.push(track);
+            if state.scan.streaming {
+                state.playlist.push(track);
+            } else {
+                state.scan_stage.push(track);
+            }
+            let indexed = state.playlist.len().max(state.scan_stage.len());
             state.scroll.set_content(state.playlist.len());
-            state.scan.indexed = state.playlist.len();
+            state.scan.indexed = indexed;
             state.scan.phase = ScanPhase::Tagging;
             state.phase = Phase::Scanning;
         }
         ScanMessage::Progress(progress) => {
-            state.scan.indexed = progress.indexed.max(state.playlist.len());
+            let streamed = state
+                .playlist
+                .len()
+                .max(state.scan_stage.len())
+                .max(state.scan.indexed);
+            state.scan.indexed = progress.indexed.max(streamed);
             state.scan.total_estimate = progress.total_estimate.max(state.scan.total_estimate);
             state.scan.phase = progress.phase;
         }
-        ScanMessage::Done(report) => {
-            let anchor = state.playlist.current().cloned();
-            state.playlist.finish_scan(anchor.as_ref());
-            state.scroll.set_content(state.playlist.len());
-            state.scan.phase = ScanPhase::Done;
-            state.scan.indexed = state.playlist.len();
-            state.scan.total_estimate = state.playlist.len();
-            state.scan.report = Some(report.clone());
-            state.phase = Phase::Ready;
-            if report.empty {
-                state.notice = Some(Notice::sticky(
-                    format!(
-                        "No audio files found in {} (looked for: {})",
-                        state.opts.folder.display(),
-                        report.extensions.join(", ")
-                    ),
-                    now,
-                ));
-            } else if report.capped {
-                state.notice = Some(Notice::warn(
-                    format!(
-                        "Showing the first {} files (--max-files reached)",
-                        state.playlist.len()
-                    ),
-                    now,
-                ));
-            } else if !report.failed.is_empty() {
-                state.notice = Some(Notice::warn(
-                    format!(
-                        "{} of {} files could not be read (marked with !)",
-                        report.failed.len(),
-                        report.scanned
-                    ),
-                    now,
-                ));
-            }
-            // Keep the playing row on screen after the re-sort.
-            if let Some(index) = state.playback.index() {
-                state.scroll.ensure_visible(index);
-            }
-        }
+        ScanMessage::Done(report) => finish_library_scan(state, report),
     }
     Vec::new()
+}
+
+/// A scan ended: either swap the new rows in, or notice that they are identical
+/// to what is already on screen and throw them away.
+///
+/// The "identical" case is what makes an idle periodic sync free: no re-sort
+/// (which is the one part of a rescan that costs real time on the UI thread), no
+/// re-anchored cursor, and no rows jumping under the mouse.
+fn finish_library_scan(state: &mut AppState, report: ScanReport) {
+    let first_load = state.library_digest.is_none();
+    let unchanged = !state.scan.streaming && state.library_digest == Some(report.digest);
+    let anchor = state.playlist.current().cloned();
+
+    if unchanged {
+        state.scan_stage.clear();
+    } else if state.scan.streaming {
+        state.playlist.finish_scan(anchor.as_ref());
+    } else {
+        let mut tracks = std::mem::take(&mut state.scan_stage);
+        let (added, removed) = if first_load {
+            (0, 0)
+        } else {
+            count_changes(state.playlist.tracks(), &tracks)
+        };
+        sort_tracks(&mut tracks);
+        state.playlist.replace(tracks, anchor.as_ref());
+        if !first_load && (added > 0 || removed > 0) {
+            state.notice = Some(Notice::info(
+                format!("Library updated: {added} new, {removed} removed"),
+                state.now,
+            ));
+        } else if !first_load {
+            // The paths are all the same but a file's contents changed (a tag
+            // write, a re-rip) — say so rather than staying silent.
+            state.notice = Some(Notice::info("Library updated: tags refreshed", state.now));
+        }
+    }
+
+    state.library_digest = Some(report.digest);
+    state.last_scan_ms = state.now;
+    state.scan.phase = ScanPhase::Done;
+    state.scan.indexed = state.playlist.len();
+    state.scan.total_estimate = state.playlist.len();
+    state.scan.report = Some(report.clone());
+    state.phase = Phase::Ready;
+    let now = state.now;
+    if report.empty {
+        state.notice = Some(Notice::sticky(
+            format!(
+                "No audio files found in {} (looked for: {})",
+                state.opts.folder.display(),
+                report.extensions.join(", ")
+            ),
+            now,
+        ));
+    } else if report.capped {
+        state.notice = Some(Notice::warn(
+            format!(
+                "Showing the first {} files (--max-files reached)",
+                state.playlist.len()
+            ),
+            now,
+        ));
+    } else if !report.failed.is_empty() {
+        state.notice = Some(Notice::warn(
+            format!(
+                "{} of {} files could not be read (marked with !)",
+                report.failed.len(),
+                report.scanned
+            ),
+            now,
+        ));
+    }
+    // Keep the playing row on screen after the re-sort.
+    if let Some(index) = state.playback.index() {
+        state.scroll.ensure_visible(index);
+    }
+}
+
+/// Rows added and removed between the library on screen and a fresh scan.
+///
+/// Only ever run when a scan actually changed something, and it only hashes
+/// paths, so the cost is proportional to what the user is not looking at.
+fn count_changes(old: &[crate::model::Track], new: &[crate::model::Track]) -> (usize, usize) {
+    let new_paths: HashSet<&Path> = new.iter().map(|track| track.path.as_path()).collect();
+    let old_paths: HashSet<&Path> = old.iter().map(|track| track.path.as_path()).collect();
+    let removed = old
+        .iter()
+        .filter(|track| !new_paths.contains(track.path.as_path()))
+        .count();
+    let added = new
+        .iter()
+        .filter(|track| !old_paths.contains(track.path.as_path()))
+        .count();
+    (added, removed)
 }
 
 fn start_rescan(state: &mut AppState) -> Vec<Effect> {
     state.scan = ScanStatus {
         phase: ScanPhase::Walking,
+        // Only the very first scan streams into the live library; after that the
+        // rows are staged and swapped in once.
+        streaming: state.library_digest.is_none(),
         ..Default::default()
     };
+    if state.scan.streaming && !state.playlist.is_empty() {
+        // Restarting the *first* scan: drop what the cancelled scan already
+        // streamed, or every row would be counted twice.
+        state.playlist = crate::model::Playlist::default();
+        state.scroll.set_content(0);
+    }
+    state.scan_stage.clear();
     state.phase = Phase::Scanning;
+    state.last_scan_ms = state.now;
     vec![Effect::Rescan]
 }
 
@@ -373,6 +476,12 @@ fn reduce_key(state: &mut AppState, key: KeyEvent, now: u64) -> Vec<Effect> {
             Vec::new()
         }
         KeyCode::Char('r') => start_rescan(state),
+        // Shift-R: a rescan that ignores the library index and re-reads every
+        // tag (the escape hatch for a rewrite that preserved mtime).
+        KeyCode::Char('R') => {
+            state.rescan_force = true;
+            start_rescan(state)
+        }
         KeyCode::Enter => state
             .selected()
             .map_or(Vec::new(), |index| play_row(state, index, now)),

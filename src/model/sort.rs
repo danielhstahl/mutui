@@ -13,6 +13,16 @@ use std::collections::HashMap;
 /// inside their album, see the sort spec §3).
 pub const TRACK_MISSING: u32 = u32::MAX;
 
+/// Version of the *meaning* of a [`SortKey`], i.e. of the rules in
+/// `docs/adr/0002-sort-and-artist-run.md`.
+///
+/// **Bump this whenever the sort or artist-run semantics change.** The library
+/// cache (`crate::library_cache`) stamps it into every file it writes, so a
+/// cache built by an older algorithm is thrown away instead of quietly keeping
+/// the user on the old order — a cached library must never be able to hide a
+/// sorting fix (this is what would have hidden `mutu-172`).
+pub const SORT_ALGORITHM: u32 = 2;
+
 /// Sentinel used when neither a track nor any of its album-mates carry a year
 /// (an undated release lands first inside its artist, see the sort spec §3.2).
 pub const YEAR_MISSING: i64 = 0;
