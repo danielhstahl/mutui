@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_music-tui"))
@@ -52,6 +53,11 @@ fn dumped_paths(stdout: &str) -> Vec<String> {
 
 /// Scan and sort a folder the way the binary does.
 fn scanned(folder: &Path) -> Vec<music_tui::model::Track> {
+    // `cli::prepare` canonicalises the folder argument, so the binary always prints
+    // resolved paths. On macOS `tempfile` hands out `/var/folders/…`, which is a
+    // symlink to `/private/var/folders/…` — comparing without resolving the same
+    // way makes every row differ by that prefix. On Linux the two are equal.
+    let folder = &std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     music_tui::scan::scan(
@@ -61,8 +67,13 @@ fn scanned(folder: &Path) -> Vec<music_tui::model::Track> {
         &cancel,
     );
     let mut tracks = Vec::new();
-    while let Ok(music_tui::scan::ScanMessage::Track(track)) = rx.recv() {
-        tracks.push(track);
+    while let Ok(message) = rx.recv() {
+        match message {
+            music_tui::scan::ScanMessage::Track(track) => tracks.push(track),
+            // `Progress` may arrive anywhere in the stream; `Done` ends it.
+            music_tui::scan::ScanMessage::Done(_) => break,
+            music_tui::scan::ScanMessage::Progress(_) => {}
+        }
     }
     music_tui::model::sort_tracks(&mut tracks);
     tracks
@@ -247,43 +258,26 @@ fn log_file_is_created_and_stdout_stays_clean() {
 #[test]
 fn running_the_ui_in_a_pty_never_pollutes_the_screen() {
     let dir = fixture_library();
-    let typescript = std::env::temp_dir().join(format!(
-        "music-tui-pty-{}-{}.log",
-        std::process::id(),
-        file_name_of(&dir)
-    ));
-    let _remove = CopyCleanup(typescript.clone());
-    let folder = dir.path().display().to_string();
-    let log = std::env::temp_dir().join(format!("music-tui-pty-{}.log", std::process::id()));
-    let inner = format!(
-        "stty rows 24 cols 80; {} --backend silent --log-file {} {}",
-        env!("CARGO_BIN_EXE_music-tui"),
-        log.display(),
-        folder
+    // An index file of its own: a test must never write into the developer's real
+    // `$XDG_CACHE_HOME/music-tui/`.
+    let store = tempfile::tempdir().expect("cache dir");
+    let index = store.path().join("index.bin");
+    let index_arg = index.to_str().expect("utf8 cache path");
+    let capture = pty_screen_retry(
+        dir.path(),
+        &["--cache-file", index_arg],
+        "clean",
+        |screen| {
+            let visible = strip_ansi(screen);
+            visible.contains("End of artist") || visible.contains("help")
+        },
     );
-    let mut child = Command::new("script")
-        .args(["-q", "-e", "-c", &inner, typescript.to_str().expect("utf8")])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let child = match child.as_mut() {
-        Ok(child) => child,
-        Err(_) => return, // `script` is not installed here.
-    };
-    // Let it draw, then quit with 'q'.
-    std::thread::sleep(std::time::Duration::from_millis(1_500));
-    if let Some(mut stdin) = child.stdin.take() {
-        let _write = stdin.write_all(b"q");
-        let _flush = stdin.flush();
+    if capture.is_empty() {
+        return; // `script` is not installed here.
     }
-    let status = child.wait().expect("script must finish");
-    assert!(status.success(), "script exit: {status}");
-
-    let capture = std::fs::read_to_string(&typescript).unwrap_or_default();
     assert!(
         capture.contains("\u{1b}[?1049h"),
-        "the alternate screen must be entered"
+        "the alternate screen must be entered; raw typescript: {capture:?}"
     );
     assert!(
         capture.contains("\u{1b}[?1049l"),
@@ -307,13 +301,6 @@ fn running_the_ui_in_a_pty_never_pollutes_the_screen() {
         visible.contains("End of artist") || visible.contains("help"),
         "the footer must be rendered: {visible}"
     );
-}
-
-fn file_name_of(dir: &tempfile::TempDir) -> String {
-    dir.path()
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "x".to_string())
 }
 
 struct CopyCleanup(PathBuf);
@@ -345,4 +332,177 @@ fn strip_ansi(input: &str) -> String {
         }
     }
     out
+}
+
+/// The footer's library count in a captured screen (the last `N songs` wins,
+/// because the footer is redrawn while the scan fills in). A pty writes cells, so
+/// the space between the number and the word may not survive: skip whitespace.
+fn song_count(visible: &str) -> Option<usize> {
+    let at = visible.rfind("songs")?;
+    let digits: String = visible[..at]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
+/// Run the real UI inside a pty for `hold_ms`, quit it with `q`, and return the
+/// typescript — the raw bytes it wrote to the terminal, escape sequences included
+/// (call [`strip_ansi`] when reading it as text). Returns `String::new()` when
+/// `script` is not installed, and the test that uses it then skips itself.
+///
+/// There is nothing to poll here: `script` buffers the typescript and writes it
+/// only when the child exits, and the app's log file is buffered too — so a caller
+/// that needs the scan to have finished can only wait. [`pty_screen_retry`] shows
+/// how the tests that depend on this keep that cheap.
+fn pty_screen(folder: &Path, extra: &[&str], hold_ms: u64, tag: &str) -> String {
+    let stem = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "x".to_string());
+    let typescript = std::env::temp_dir().join(format!(
+        "music-tui-pty-{}-{}-{}.log",
+        std::process::id(),
+        stem,
+        tag
+    ));
+    let log =
+        std::env::temp_dir().join(format!("music-tui-pty-{}-{}.log", std::process::id(), tag));
+    let mut inner = format!(
+        "stty rows 24 cols 80; {} --backend silent --log-file {}",
+        env!("CARGO_BIN_EXE_music-tui"),
+        log.display()
+    );
+    for arg in extra {
+        inner.push(' ');
+        inner.push_str(arg);
+    }
+    inner.push(' ');
+    inner.push_str(&folder.display().to_string());
+    let mut child = script_command(&inner, &typescript)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let child = match child.as_mut() {
+        Ok(child) => child,
+        Err(_) => return String::new(),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+    if let Some(mut stdin) = child.stdin.take() {
+        let _write = stdin.write_all(b"q");
+        let _flush = stdin.flush();
+    }
+    let _status = child.wait().expect("script must finish");
+    let capture = std::fs::read_to_string(&typescript).unwrap_or_default();
+    let _remove = std::fs::remove_file(&typescript);
+    capture
+}
+
+/// `script` is not one program: util-linux takes `-q -e -c CMD FILE`, while the BSD
+/// version on macOS has neither `-e` nor `-c` and takes `FILE CMD …`. Probe once and
+/// use the right spelling, or the pty tests fail on anything that is not Linux.
+fn script_command(inner: &str, typescript: &Path) -> Command {
+    static GNU: OnceLock<bool> = OnceLock::new();
+    let gnu = *GNU.get_or_init(|| {
+        Command::new("script")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    let mut command = Command::new("script");
+    if gnu {
+        command.args(["-q", "-e", "-c", inner, &typescript.to_string_lossy()]);
+    } else {
+        command.args(["-q", &typescript.to_string_lossy(), "sh", "-c", inner]);
+    }
+    command
+}
+
+/// [`pty_screen`] again with a longer hold while `want` is not satisfied.
+///
+/// A fixed hold is the only option (see above), and a fixed hold is exactly what
+/// fails on a machine that is busy elsewhere — a real source of failed tests in
+/// this suite. So try short, and only pay longer waits when the capture came back
+/// useless: on an idle machine this costs the first hold and nothing more.
+fn pty_screen_retry(
+    folder: &Path,
+    extra: &[&str],
+    tag: &str,
+    want: impl Fn(&str) -> bool,
+) -> String {
+    let mut capture = String::new();
+    for hold in [1_200_u64, 6_000, 20_000] {
+        capture = pty_screen(folder, extra, hold, tag);
+        if capture.is_empty() || want(&capture) {
+            break;
+        }
+    }
+    capture
+}
+
+/// A library with no deliberately-broken file, so the footer shows the library
+/// count instead of a warning.
+fn clean_library() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    music_tui::testing::FixtureSet::new(dir.path())
+        .song("alpha/one.wav", "One", "Alpha Beta", "Album 1", 1, 1, 1998)
+        .song("alpha/two.wav", "Two", "Alpha Beta", "Album 1", 1, 2, 1998)
+        .song("beta/one.wav", "One", "Beta Wave", "Double", 1, 1, 1994)
+        .song("beta/two.wav", "Two", "Beta Wave", "Double", 1, 2, 1994)
+        .write_all()
+        .expect("fixtures");
+    dir
+}
+
+#[test]
+fn cold_start_background_syncs_and_warm_start_all_show_one_library() {
+    let dir = clean_library();
+    let cache =
+        std::env::temp_dir().join(format!("music-tui-pty-index-{}.bin", std::process::id()));
+    let _cleanup = CopyCleanup(cache.clone());
+    let cache_arg = cache.to_str().expect("utf8 cache path");
+    let folder = dir.path();
+
+    // First start: no index yet, it is written by this run.
+    let cold_raw = pty_screen_retry(folder, &["--cache-file", cache_arg], "cold", |screen| {
+        song_count(&strip_ansi(screen)).is_some()
+    });
+    if cold_raw.is_empty() {
+        return; // `script` is not installed here.
+    }
+    let cold = strip_ansi(&cold_raw);
+    assert!(
+        song_count(&cold).is_some(),
+        "the footer never appeared in the pty: {cold}"
+    );
+    assert!(cache.exists(), "the first run must write the index");
+    assert!(
+        !cold.contains("music-tui:") && !cold.contains("panicked"),
+        "diagnostics must never reach the screen: {cold}"
+    );
+    let cold_count = song_count(&cold).expect("footer shows a library count");
+    assert!(cold_count > 0, "the folder has audio: {cold}");
+
+    // Restart with the index it just wrote, and a background sync every second:
+    // three syncs of an unchanged folder must not add a single row.
+    let warm_raw = pty_screen_retry(
+        folder,
+        &["--cache-file", cache_arg, "--sync-interval", "1"],
+        "warm",
+        |screen| song_count(&strip_ansi(screen)).is_some(),
+    );
+    let warm = strip_ansi(&warm_raw);
+    let warm_count = song_count(&warm).expect("footer shows a library count");
+    assert_eq!(
+        cold_count, warm_count,
+        "an indexed start and three background syncs must show exactly the same library"
+    );
 }

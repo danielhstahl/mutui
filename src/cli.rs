@@ -51,6 +51,26 @@ pub struct Cli {
     #[arg(long, default_value_t = 500_000, value_name = "N")]
     pub max_entries: usize,
 
+    /// Where the library index for this folder is stored (default: a file named
+    /// after the folder and the scanner flags, under $XDG_CACHE_HOME/music-tui/).
+    #[arg(long, value_name = "PATH")]
+    pub cache_file: Option<PathBuf>,
+
+    /// Do not read or write the library index: open and re-read every file on
+    /// every start. Use it where mtime cannot be trusted (some NFS/SMB mounts).
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Ignore the stored library index once (re-read every tag, then write the
+    /// index again). Also available in the UI as shift-R.
+    #[arg(long)]
+    pub refresh: bool,
+
+    /// Re-sync the library in the background every N seconds; 0 turns it off.
+    /// A sync that finds nothing new costs one stat per file and no re-tagging.
+    #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+    pub sync_interval: u64,
+
     /// Rows scrolled by one mouse wheel notch.
     #[arg(long, default_value_t = 3, value_name = "N")]
     pub wheel_rows: i32,
@@ -95,7 +115,14 @@ impl Cli {
             },
             include_hidden: false,
             max_depth: base.max_depth,
+            cache: None,
         }
+    }
+    /// How often the event loop should re-sync the library in the background
+    /// (`--sync-interval`; zero turns the periodic sync off).
+    #[must_use]
+    pub fn sync_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sync_interval)
     }
 }
 

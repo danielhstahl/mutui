@@ -16,6 +16,7 @@ use lofty::probe::Probe;
 use lofty::tag::ItemKey;
 use walkdir::WalkDir;
 
+use crate::library_cache::{Fingerprint, LibraryCache, LibraryDigest, ScanToken};
 use crate::model::Track;
 
 /// Extensions treated as audio files unless `--extensions` widens the list.
@@ -45,6 +46,11 @@ pub struct ScanConfig {
     pub threads: usize,
     /// Also descend into dot-directories.
     pub include_hidden: bool,
+    /// Library index from a previous run, consulted before a file is opened.
+    ///
+    /// `None` (the default) means "always read every tag", which is what
+    /// `--dump-sort` and the tests want. See [`crate::library_cache`].
+    pub cache: Option<std::sync::Arc<crate::library_cache::LibraryCache>>,
 }
 
 impl Default for ScanConfig {
@@ -62,6 +68,7 @@ impl Default for ScanConfig {
                 .unwrap_or(1)
                 .clamp(1, 8),
             include_hidden: false,
+            cache: None,
         }
     }
 }
@@ -127,6 +134,17 @@ pub struct ScanReport {
     pub elapsed: Duration,
     /// Extensions that were tried (for the empty-folder message).
     pub extensions: Vec<String>,
+    /// Rows reused from the library index instead of opening the file.
+    pub cached: usize,
+    /// Order-independent hash of every row this scan produced.
+    ///
+    /// Two scans of the same folder that agree on every row agree on this value,
+    /// which lets the reducer skip the re-sort of a sync that changed nothing
+    /// ([`crate::library_cache::LibraryDigest`]).
+    pub digest: u64,
+    /// Set when the index is current for this scan (written now, or already
+    /// byte-identical on disk). `None` for partial or cancelled scans.
+    pub cache_file: Option<PathBuf>,
 }
 
 /// Messages streamed from the scanner threads to the app.
@@ -247,14 +265,64 @@ fn read_tags(path: &Path) -> Result<RawTags, String> {
     Ok(raw)
 }
 
+/// Produce the row for one file.
+///
+/// The index answers whenever the file's [`Fingerprint`] still matches, so the
+/// file is never opened; otherwise the tags are read and (on success only) stored
+/// for the next scan. Failures are never stored: a corrupt or temporarily
+/// unreadable file must be retried instead of staying marked corrupt forever.
+///
+/// Returns `(track, error, from_cache)`.
+fn read_one(
+    cache: Option<&LibraryCache>,
+    token: &ScanToken,
+    path: &Path,
+    fingerprint: Option<Fingerprint>,
+) -> (Track, Option<String>, bool) {
+    if let (Some(cache), Some(fingerprint)) = (cache, fingerprint) {
+        if let Some(track) = cache.lookup(token, path, fingerprint) {
+            return (track, None, true);
+        }
+        let (track, err) = tag_file(path);
+        if err.is_none() {
+            cache.insert(token, path.to_path_buf(), fingerprint, &track);
+        }
+        return (track, err, false);
+    }
+    let (track, err) = tag_file(path);
+    (track, err, false)
+}
+
 #[derive(Debug)]
 struct Shared {
     tx: Mutex<Sender<ScanMessage>>,
     tagged: AtomicUsize,
     succeeded: AtomicUsize,
+    cached: AtomicUsize,
     failed: Mutex<Vec<(PathBuf, String)>>,
     last_progress: AtomicU64,
+    /// Lock-free accumulators for the library digest (see
+    /// [`crate::library_cache::LibraryDigest`]: the mixing happens once, at the
+    /// end, so the workers only ever do two atomic ops).
+    digest_sum: AtomicU64,
+    digest_xor: AtomicU64,
 }
+
+/// One file handed to a tagging worker.
+struct Job {
+    path: PathBuf,
+    /// `None` when the file could not be `stat`ed: such a file is always tagged
+    /// and never cached.
+    fingerprint: Option<Fingerprint>,
+}
+
+/// Unknown-file stand-in for the digest, so a `stat` failure changes the digest
+/// (the conservative direction: the reducer re-applies the library) instead of
+/// silently matching the previous scan.
+const NO_FINGERPRINT: Fingerprint = Fingerprint {
+    size: 0,
+    mtime_nanos: 0,
+};
 
 /// Packed `(ms, tagged_files)` stamp for progress coalescing (fits in u64).
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +345,13 @@ impl LastProgress {
 }
 
 impl Shared {
+    /// Fold one produced row into the library digest.
+    fn add_row(&self, track: &Track, fingerprint: Option<Fingerprint>) {
+        let hash = crate::library_cache::row_digest(track, fingerprint.unwrap_or(NO_FINGERPRINT));
+        self.digest_sum.fetch_add(hash, Ordering::Relaxed);
+        self.digest_xor.fetch_xor(hash, Ordering::Relaxed);
+    }
+
     fn report_progress(&self, total_estimate: usize, phase: ScanPhase) {
         let now_ms = crate::app::time::now_ms();
         let last = LastProgress::unpack(self.last_progress.load(Ordering::Relaxed));
@@ -306,6 +381,10 @@ impl Shared {
 ///
 /// Spreads tagging over `cfg.threads` workers and always sends exactly one
 /// [`ScanMessage::Done`] last. Returns the report (also sent).
+///
+/// Files whose [`Fingerprint`] matches the [`ScanConfig::cache`] entry are never
+/// opened; the walk itself always happens, because the walk is what notices
+/// added and deleted files.
 pub fn scan(
     root: &Path,
     cfg: &ScanConfig,
@@ -313,23 +392,36 @@ pub fn scan(
     cancel: &Arc<AtomicBool>,
 ) -> ScanReport {
     let started = Instant::now();
+    let token = cfg
+        .cache
+        .as_ref()
+        .map(|cache| cache.begin_scan())
+        .unwrap_or(ScanToken::uncached());
     let shared = Arc::new(Shared {
         tx: Mutex::new(tx.clone()),
         tagged: AtomicUsize::new(0),
         succeeded: AtomicUsize::new(0),
+        cached: AtomicUsize::new(0),
         failed: Mutex::new(Vec::new()),
+        // Seeded with *now*, not zero: `now_ms` counts from process start, so a
+        // zero here would make the very first `report_progress` call pass its
+        // throttle and put a `Progress` message in front of the first `Track`.
+        // Consumers that read "until the first non-Track message" would then see
+        // an empty library, and a scan of a small folder is exactly that case.
         last_progress: AtomicU64::new(
             LastProgress {
-                last_ms: 0,
+                last_ms: crate::app::time::now_ms(),
                 tagged: 0,
             }
             .pack(),
         ),
+        digest_sum: AtomicU64::new(0),
+        digest_xor: AtomicU64::new(0),
     });
 
     // Bounded queue: a huge tree cannot make us hold every path in memory.
     let (path_tx, path_rx) =
-        std::sync::mpsc::sync_channel::<PathBuf>(cfg.threads.saturating_mul(64).max(64));
+        std::sync::mpsc::sync_channel::<Job>(cfg.threads.saturating_mul(64).max(64));
     let path_rx = Arc::new(Mutex::new(path_rx));
 
     let mut workers = Vec::with_capacity(cfg.threads.max(1));
@@ -337,20 +429,25 @@ pub fn scan(
         let rx = Arc::clone(&path_rx);
         let shared = Arc::clone(&shared);
         let cancel = Arc::clone(cancel);
+        let cache = cfg.cache.clone();
         workers.push(thread::spawn(move || loop {
             let next = {
                 let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.recv()
             };
-            let Ok(path) = next else { break };
+            let Ok(job) = next else { break };
             if cancel.load(Ordering::Relaxed) {
                 continue;
             }
-            let (track, err) = tag_file(&path);
+            let Job { path, fingerprint } = job;
+            let (track, err, from_cache) = read_one(cache.as_deref(), &token, &path, fingerprint);
             shared.tagged.fetch_add(1, Ordering::Relaxed);
             match err {
                 None => {
                     shared.succeeded.fetch_add(1, Ordering::Relaxed);
+                    if from_cache {
+                        shared.cached.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 Some(reason) => {
                     if let Ok(mut failed) = shared.failed.lock() {
@@ -358,6 +455,7 @@ pub fn scan(
                     }
                 }
             }
+            shared.add_row(&track, fingerprint);
             if let Ok(guard) = shared.tx.lock() {
                 let _drop = guard.send(ScanMessage::Track(track));
             }
@@ -415,7 +513,16 @@ pub fn scan(
             break;
         }
         indexed += 1;
-        if path_tx.send(entry.path().to_path_buf()).is_err() {
+        // One `stat` per audio file is what the cache is bought with; it replaces
+        // an `open()` + tag parse for every file that has not changed.
+        let fingerprint = entry.metadata().ok().as_ref().map(Fingerprint::of);
+        if path_tx
+            .send(Job {
+                path: entry.path().to_path_buf(),
+                fingerprint,
+            })
+            .is_err()
+        {
             report.cancelled = true;
             break;
         }
@@ -433,6 +540,36 @@ pub fn scan(
     report.failed = failed;
     report.empty = indexed == 0;
     report.elapsed = started.elapsed();
+    report.cached = shared.cached.load(Ordering::Relaxed);
+    report.digest = LibraryDigest::from_accumulators(
+        shared.digest_sum.load(Ordering::Relaxed),
+        shared.digest_xor.load(Ordering::Relaxed),
+        u64::try_from(shared.tagged.load(Ordering::Relaxed)).unwrap_or(u64::MAX),
+    )
+    .finish();
+
+    // Refresh the index, but never from a partial scan: a scan that stopped at a
+    // cap (or was cancelled) did not see most of the library, and pruning to
+    // what it did see would quietly lose rows.
+    if let Some(cache) = cfg.cache.as_ref() {
+        if !report.capped && !report.entry_capped && !report.cancelled {
+            match cache.save(&token, report.digest) {
+                Ok(wrote) => {
+                    tracing::debug!(
+                        wrote,
+                        path = %cache.path().display(),
+                        "library index up to date"
+                    );
+                    report.cache_file = Some(cache.path().to_path_buf());
+                }
+                Err(reason) => tracing::warn!(
+                    reason = %reason,
+                    path = %cache.path().display(),
+                    "could not write the library index"
+                ),
+            }
+        }
+    }
 
     send(
         tx,

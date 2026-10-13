@@ -5,10 +5,12 @@
 //! broken. See `benches/sort_and_window.rs` for the release-mode measurements.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use music_tui::app::{AppState, Options, Phase};
+use music_tui::library_cache::{self, LibraryCache};
 use music_tui::model::{sort_tracks, Track};
+use music_tui::scan::{self, ScanConfig, ScanMessage, ScanReport};
 use music_tui::ui::render_lines;
 
 fn tracks(n: usize) -> Vec<Track> {
@@ -118,5 +120,115 @@ fn scrolling_a_huge_library_is_constant_time() {
     assert!(
         elapsed < std::time::Duration::from_secs(10),
         "10k wheel notches took {elapsed:?}"
+    );
+}
+
+/// Scan `root` with `cache` and report how long the whole thing took.
+fn timed_scan(
+    root: &std::path::Path,
+    cache: std::sync::Arc<LibraryCache>,
+) -> (Duration, ScanReport) {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    let config = ScanConfig {
+        cache: Some(cache),
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let root = root.to_path_buf();
+    let handle = std::thread::spawn(move || scan::scan(&root, &config, &tx, &cancel));
+    let mut report = ScanReport::default();
+    while let Ok(message) = rx.recv() {
+        if let ScanMessage::Done(done) = message {
+            report = done;
+        }
+    }
+    let _joined = handle.join();
+    (started.elapsed(), report)
+}
+
+#[test]
+fn a_warm_scan_is_much_cheaper_than_a_cold_one() {
+    use music_tui::testing::FixtureSet;
+
+    let library = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("cache tempdir");
+    let files = 2_000usize;
+    let mut set = FixtureSet::new(library.path());
+    for i in 0..files {
+        set = set.song(
+            &format!("artist{:02}/track{:04}.mp3", i % 40, i),
+            &format!("Track {:02}", i % 40),
+            &format!("Artist {:02}", i % 40),
+            &format!("Album {:02}", i % 6),
+            1,
+            (i % 12) as u32 + 1,
+            1980 + (i % 40) as u32,
+        );
+    }
+    set.write_all().expect("write fixtures");
+
+    let file = scratch.path().join("index.bin");
+    let fingerprint = library_cache::config_fingerprint(library.path(), &ScanConfig::default());
+    // `refresh = true` => read every tag whatever is on disk; `false` => the warm
+    // path, exactly what a restarted process does.
+    let cold_scan = || {
+        timed_scan(
+            library.path(),
+            std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, true)),
+        )
+    };
+    let warm_scan = || {
+        timed_scan(
+            library.path(),
+            std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, false)),
+        )
+    };
+
+    let mut cold = cold_scan();
+    assert_eq!(cold.1.succeeded, files, "cold scan read everything");
+    assert_eq!(cold.1.cached, 0);
+    let mut warm = warm_scan();
+    assert_eq!(warm.1.cached, files, "warm scan opened no files");
+    assert_eq!(warm.1.digest, cold.1.digest, "same rows either way");
+
+    // Two more samples of each, and compare the fastest of each: this is a budget,
+    // not a measurement, and one unlucky sample taken while another process was
+    // busy must not fail the build.
+    for _ in 0..2 {
+        let again = cold_scan();
+        if again.0 < cold.0 {
+            cold = again;
+        }
+        let again = warm_scan();
+        if again.0 < warm.0 {
+            warm = again;
+        }
+    }
+    println!(
+        "scan of {files} tagged files: cold {:?}, warm {:?} ({} rows served from the index)",
+        cold.0, warm.0, warm.1.cached
+    );
+    assert!(
+        warm.0 * 2 < cold.0,
+        "the index must at least halve the scan: cold {cold:?}, warm {warm:?}",
+    );
+
+    // And a no-change sync leaves the file alone instead of rewriting it.
+    let before = std::fs::metadata(&file).expect("metadata");
+    let again = timed_scan(
+        library.path(),
+        std::sync::Arc::new(LibraryCache::open(file.clone(), fingerprint, false)),
+    );
+    assert_eq!(again.1.cached, files);
+    let after = std::fs::metadata(&file).expect("metadata");
+    assert_eq!(before.len(), after.len(), "same file");
+    assert_eq!(
+        before.modified().ok(),
+        after.modified().ok(),
+        "an unchanged sync must not rewrite the index"
     );
 }

@@ -9,6 +9,6 @@ pub use fixtures::{fixture_table, fixture_tracks, FixtureRow, TABLE};
 pub use playlist::{Playlist, RunEnded};
 pub use sort::{
     apply_album_years, dump_sorted_order, natural_cmp, normalize, sort_tracks, SortKey,
-    TRACK_MISSING, YEAR_MISSING,
+    SORT_ALGORITHM, TRACK_MISSING, YEAR_MISSING,
 };
 pub use track::Track;

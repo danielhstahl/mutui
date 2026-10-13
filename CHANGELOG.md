@@ -7,6 +7,31 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
 ## [Unreleased]
 
+### Added
+
+* **The library is indexed, so starting up stops reading every file**
+  (`docs/adr/0003-library-cache.md`). Reading tags — not walking, not sorting —
+  is what start-up waits on (~70% of a scan, and it barely parallelises because
+  it is syscall-latency bound). `music-tui` now keeps an index of the library in
+  `$XDG_CACHE_HOME/music-tui/<folder>-<hash>.bin`, and compares each file's size
+  and mtime before opening it: unchanged files are answered from the index and
+  never opened, while the walk still happens so additions and deletions are
+  always found. Measured on a 14 400-file library: **1.07 s → 60 ms** cold, 137 ms
+  → 58 ms warm (`cargo run --release --example cache_bench -- ~/Music` prints it
+  for your own folder). The index is versioned against the sort rules, so a
+  release that changes ordering is never hidden by a stale cache; unreadable
+  files are never cached, so a broken file is retried every scan; a scan that hit
+  a cap or was cancelled never rewrites it; and a file that changed size or mtime
+  is re-read. New flags: `--no-cache`, `--refresh`, `--cache-file`,
+  `--sync-interval`, and shift-`R` to re-read every tag once.
+* **Background library sync.** Every 60 seconds (`--sync-interval`, `0` turns it
+  off) the app re-syncs in the background: new songs appear, deleted ones go
+  away, retagged ones update, and the footer reports `Library updated: 2 new, 1
+  removed`. Because a scan carries a digest of the whole library, a sync that
+  finds nothing changes nothing at all — no re-sort, no rows moving under the
+  mouse, no rewrite of the index file. Syncs never stack, and none starts while
+  you are dragging the scrollbar.
+
 ### Changed
 
 * **The blue is softer and now readable on a black terminal** (`mutu-eo1`). The
@@ -19,9 +44,32 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
   colours moved out of the widgets into `src/ui/palette.rs`, where they are named
   by meaning, and that module's tests measure WCAG 2.1 contrast so a harsh or
   illegible colour cannot creep back. No other hue changed.
+* `docs/benchmarks.md` said the sort runs on the scanner threads, which was never
+  true: it runs on the main thread when a scan *changed* the library (175 ms per
+  14 400 rows with many shared artist/album prefixes). The page now says where it
+  really happens, why it is acceptable, and that an unchanged sync skips it.
 
 ### Fixed
 
+* **A scan can no longer put a progress message ahead of the first row.** The
+  progress throttle was seeded with "never sent", so its very first call always
+  passed the gate; whenever the walker won the race against the tagging workers —
+  which is what CPU starvation on a busy runner does — that first `Progress`
+  landed in front of every `Track`, and a consumer that stops reading at the first
+  message that is not a row then saw an *empty library*. Three test helpers did
+  exactly that, which is why `rapid_clicks_leave_exactly_one_track_playing` and
+  `stale_finished_event_from_the_worker_is_ignored` reported "no plays at all" on
+  GitHub Actions but never locally. The throttle is now seeded with the start of
+  the scan, so the first progress tick waits for `PROGRESS_INTERVAL` to have
+  actually elapsed (which is when progress reporting starts to say something), the
+  helpers read a scan in any order (`Done` ends the stream, `Progress` is
+  ignored), and `tests/scan_fixtures.rs::the_first_message_of_a_scan_is_a_row_not_progress`
+  pins the contract.
+* **Rescanning (`r`) no longer duplicates the library.** The streamed rows were
+  appended to the rows already on screen and everything was re-sorted together,
+  so a rescan of an unchanged folder showed the library twice (and moved the
+  selection while doing it). Later scans are now staged and swapped in once, and
+  a scan whose digest matches the library on screen is discarded outright.
 * **An artist's albums are now ordered by release year, not by album title**
   (`mutu-172`). The sort key is artist → album year → album → disc → track →
   row year → file name → path, so a 1990 record comes before a 1995 one even

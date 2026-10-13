@@ -6,6 +6,8 @@
 //! * [`model`] — [`model::Track`], the sort key and the [`model::Playlist`]
 //!   (cursor + artist-run boundaries).
 //! * [`scan`] — recursive metadata scanner (runs on worker threads).
+//! * [`library_cache`] — versioned, fingerprint-keyed cache of the index a scan
+//!   produced, plus the library digest that makes a no-change rescan free.
 //! * [`audio`] — playback backend abstraction: [`audio::PlayerCommand`] /
 //!   [`audio::PlayerEvent`] and the worker thread that owns the sound device.
 //! * [`app`] — the application state plus the pure `reduce` function that turns
@@ -21,6 +23,7 @@ pub mod app;
 pub mod audio;
 pub mod cli;
 pub mod error;
+pub mod library_cache;
 pub mod log;
 pub mod model;
 pub mod run;

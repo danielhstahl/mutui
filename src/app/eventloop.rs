@@ -197,7 +197,7 @@ pub fn run_loop(
     input: &mut dyn InputSource,
     drawer: &mut dyn Drawer,
     clock: &dyn Clock,
-    on_rescan: &mut dyn FnMut(),
+    on_rescan: &mut dyn FnMut(bool),
     max_iterations: Option<usize>,
 ) -> Result<()> {
     let mut iterations = 0usize;
@@ -254,7 +254,12 @@ pub fn run_loop(
                     player.apply(&command);
                     state.dirty = true;
                 }
-                Effect::Rescan => on_rescan(),
+                Effect::Rescan => {
+                    // `rescan_force` is the `R` binding: this one scan ignores
+                    // the library index and re-reads every tag.
+                    let force = std::mem::take(&mut state.rescan_force);
+                    on_rescan(force);
+                }
                 Effect::Quit => {
                     state.quit = true;
                 }

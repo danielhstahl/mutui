@@ -83,6 +83,9 @@ terminal + AppState      owns one Backend                         walkdir + N ta
   `--scan-threads` workers, streaming `ScanMessage` into one channel. A rescan
   cancels the old walk and swaps the `Receiver` (`run::ScanJob::restart`) so
   late messages from a cancelled scan disappear instead of duplicating rows.
+  Before opening a file a worker asks the library index (`src/library_cache.rs`,
+  [`0003`](0003-library-cache.md)) whether that file changed since the last scan;
+  the walk itself is never skipped.
 
 Message definitions (normative):
 
@@ -128,6 +131,7 @@ src/log.rs          file-only tracing-subscriber setup
 src/terminal.rs     raw mode / alt screen / mouse capture RAII, panic + SIGINT hooks
 src/model/          track.rs, sort.rs, playlist.rs, fixtures.rs (pure)
 src/scan.rs         walker + taggers + ScanReport (pure w.r.t. UI)
+src/library_cache.rs on-disk library index: fingerprints, digest, file format (0003)
 src/audio/          mod.rs (contract + worker), command_backend.rs, null.rs, mock.rs
 src/app/            state.rs, reducer.rs (pure), eventloop.rs, time.rs
 src/ui/             layout.rs, scroll.rs, list.rs, footer.rs, mouse.rs, render.rs, truncate.rs

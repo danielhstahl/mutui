@@ -86,7 +86,7 @@ to keep the mouse entirely to the terminal.
 | `n` / `p` | next / previous song **inside the current artist run** (refuses at the boundary) |
 | `m` | mute / unmute |
 | `+` / `-` | volume up / down |
-| `r` | rescan the folder |
+| `r` / shift-`R` | rescan the folder (shift-`R` re-reads every tag from disk) |
 | `?` or `F1` | help overlay |
 
 ### Colours
@@ -97,6 +97,38 @@ named by meaning (`ACCENT`, `MUTED`, `STATE_PLAYING`, …) instead of scattered
 blue `#87AFD7`, 9.1:1 on black; ANSI `Blue` was 2.2:1 and unreadable there.
 Every text colour is checked against WCAG AA by the tests in that module, and
 colour-only changes should touch that file alone.
+
+### Library index and background sync
+
+Reading tags is the slow part of starting up: on a 14 400-file test library the
+walk costs 15 ms and reading the tags costs ~200 ms. So `music-tui` keeps an
+**index** of the library in
+`$XDG_CACHE_HOME/music-tui/<folder>-<hash>.bin` and, on every scan, compares each
+file's size and mtime before opening it: unchanged files are answered from the
+index and never opened. On the same library that is **1 s → 60 ms** cold, 137 ms →
+58 ms with everything in the page cache (`cargo run --release --example
+cache_bench -- ~/Music` prints it for your own folder).
+
+Every 60 seconds (configurable, `--sync-interval`, `0` disables it) the app
+re-syncs in the background: new songs appear, deleted ones go away, retagged ones
+update, and the footer says `Library updated: 2 new, 1 removed`. A sync that finds
+nothing changes nothing at all — no re-sort, no rows jumping under the mouse, no
+rewrite of the index file.
+
+What it trusts, and what it does not:
+
+* A cached row is reused only while the file's size **and** mtime are unchanged,
+  so a re-rip or a tag write (taggers update mtime) is always picked up.
+* Unreadable files are never cached, so a broken file is retried every scan
+  instead of staying marked `!` forever.
+* A scan that hit `--max-files`, or that was cancelled, never rewrites the index.
+* The index is stamped with the sort rules it was built under, so a release that
+  changes the ordering is never hidden by a stale cache.
+* If a rewrite preserves both size and mtime, the app cannot see it: press
+  shift-`R` (or start with `--refresh`) to re-read everything once.
+* On filesystems where mtime is unreliable (some NFS/SMB mounts) use `--no-cache`
+  — and `--sync-interval 0` with it, because without an index every sync is a full
+  re-read.
 
 ### Command line
 
@@ -109,6 +141,10 @@ Usage: music-tui [OPTIONS] <FOLDER>
   --debug                 verbose logging into the log file
   --max-files <N>         refuse to index more than N files (default 50000)
   --max-entries <N>       refuse to walk more than N directory entries (default 500000)
+  --cache-file <PATH>     where the library index for this folder lives
+  --no-cache              never read or write the library index
+  --refresh               ignore the index once, then rewrite it
+  --sync-interval <SECS>  background re-sync period (default 60, 0 = never)
   --wheel-rows <N>        rows per wheel notch (default 3)
   --backend <BACKEND>     auto | command | silent | mock | none
   --ascii                 plain-ASCII glyphs

@@ -166,6 +166,13 @@ pub struct ScanStatus {
     pub total_estimate: usize,
     /// Final report, once the scan is done.
     pub report: Option<ScanReport>,
+    /// `true` while the scan streams rows straight into the live library.
+    ///
+    /// Only the *first* scan does that (the list fills in while the walker runs).
+    /// Every later scan stages its rows in [`AppState::scan_stage`] and swaps
+    /// them in once, which is what keeps a rescan from doubling the library or
+    /// reshuffling it half-way through.
+    pub streaming: bool,
 }
 
 impl ScanStatus {
@@ -195,6 +202,10 @@ pub struct Options {
     pub ascii: bool,
     /// Show a debug line in the footer.
     pub debug_footer: bool,
+    /// How often to re-sync the library in the background (`--sync-interval`).
+    /// Zero disables it; the default here is zero so that a test state never
+    /// syncs on its own, while the CLI defaults to 60 seconds.
+    pub sync_interval: Duration,
 }
 
 impl Default for Options {
@@ -205,6 +216,7 @@ impl Default for Options {
             wheel_rows: crate::ui::scroll::WHEEL_ROWS,
             ascii: false,
             debug_footer: false,
+            sync_interval: Duration::ZERO,
         }
     }
 }
@@ -248,6 +260,17 @@ pub struct AppState {
     pub last_play: Option<(usize, u64)>,
     /// `true` when the last handled message changed the visible state.
     pub dirty: bool,
+    /// Rows produced by the scan in flight, when it is a rescan (see
+    /// [`ScanStatus::streaming`]). Swapped into `playlist` when the scan ends.
+    pub scan_stage: Vec<crate::model::Track>,
+    /// Digest of the library currently on screen, from its [`ScanReport`].
+    /// A sync whose digest matches this one changes nothing at all.
+    pub library_digest: Option<u64>,
+    /// `true` when the next rescan must re-read every tag (the `R` binding),
+    /// consumed by the event loop when it applies [`super::reducer::Effect::Rescan`].
+    pub rescan_force: bool,
+    /// Timestamp (ms) of the last scan that finished, used by the periodic sync.
+    pub last_scan_ms: u64,
     /// Timestamp (ms) of the most recent message the reducer saw.
     pub now: u64,
     /// Options.
@@ -263,7 +286,11 @@ impl AppState {
             scroll: Scroll::new(),
             areas: areas(ratatui::layout::Rect::new(0, 0, 80, 24)),
             phase: Phase::Scanning,
-            scan: ScanStatus::default(),
+            scan: ScanStatus {
+                // The first scan streams into the (empty) library.
+                streaming: true,
+                ..ScanStatus::default()
+            },
             playback: PlaybackState::Idle,
             position: Duration::ZERO,
             volume: 1.0,
@@ -279,6 +306,10 @@ impl AppState {
             dirty: true,
             now: 0,
             opts,
+            scan_stage: Vec::new(),
+            library_digest: None,
+            rescan_force: false,
+            last_scan_ms: 0,
         }
     }
 
