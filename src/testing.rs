@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor as _, AudioFile as _, ItemKey, TaggedFileExt as _};
-use lofty::tag::items::Timestamp;
 use lofty::tag::Tag;
+use lofty::tag::items::Timestamp;
 
 /// Tag values to write into a generated file.
 #[derive(Debug, Clone, Default)]

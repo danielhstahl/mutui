@@ -1,7 +1,7 @@
 //! Table-driven tests for the sort spec (docs/adr/0002-sort-and-artist-run.md).
 
 use music_tui::model::{
-    fixture_tracks, natural_cmp, sort_tracks, FixtureRow, TABLE, TRACK_MISSING,
+    FixtureRow, TABLE, TRACK_MISSING, fixture_tracks, natural_cmp, sort_tracks,
 };
 
 fn expected_order() -> Vec<&'static str> {

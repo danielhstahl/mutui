@@ -2,9 +2,9 @@
 //! scripted input and a drawer that captures frames (`mutu-2h8.21`).
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::sync::{mpsc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};

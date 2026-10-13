@@ -4,11 +4,11 @@
 //! [`compose`] packs them into the available width. Both are pure: the footer
 //! never panics at 20 columns and never corrupts the layout.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::app::state::{AppState, NoticeLevel, Phase, PlaybackState};
@@ -223,7 +223,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 mod tests {
     use super::*;
     use crate::app::state::{Notice, Options};
-    use crate::model::{fixture_tracks, sort_tracks, Track};
+    use crate::model::{Track, fixture_tracks, sort_tracks};
 
     fn state(width_hint: u16) -> AppState {
         let mut tracks = fixture_tracks();

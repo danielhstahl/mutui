@@ -6,14 +6,14 @@
 //! check.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
-use music_tui::app::{reduce, AppState, Effect, Msg, Options, Phase};
+use music_tui::app::{AppState, Effect, Msg, Options, Phase, reduce};
 use music_tui::library_cache::{self, LibraryCache};
-use music_tui::model::{fixture_tracks, sort_tracks, Track};
+use music_tui::model::{Track, fixture_tracks, sort_tracks};
 use music_tui::scan::{self, ScanConfig, ScanMessage, ScanReport};
 use music_tui::testing::FixtureSet;
 

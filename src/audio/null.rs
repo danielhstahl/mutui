@@ -260,9 +260,11 @@ mod tests {
             "no position events while paused"
         );
         backend.resume().expect("resume");
-        assert!(pump(&mut backend, 400)
-            .iter()
-            .any(|e| matches!(e, PlayerEvent::Position { .. })));
+        assert!(
+            pump(&mut backend, 400)
+                .iter()
+                .any(|e| matches!(e, PlayerEvent::Position { .. }))
+        );
     }
 
     #[test]

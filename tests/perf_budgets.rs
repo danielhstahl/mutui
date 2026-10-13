@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use music_tui::app::{AppState, Options, Phase};
 use music_tui::library_cache::{self, LibraryCache};
-use music_tui::model::{sort_tracks, Track};
+use music_tui::model::{Track, sort_tracks};
 use music_tui::scan::{self, ScanConfig, ScanMessage, ScanReport};
 use music_tui::ui::render_lines;
 

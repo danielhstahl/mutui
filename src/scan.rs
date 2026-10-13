@@ -430,36 +430,39 @@ pub fn scan(
         let shared = Arc::clone(&shared);
         let cancel = Arc::clone(cancel);
         let cache = cfg.cache.clone();
-        workers.push(thread::spawn(move || loop {
-            let next = {
-                let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.recv()
-            };
-            let Ok(job) = next else { break };
-            if cancel.load(Ordering::Relaxed) {
-                continue;
-            }
-            let Job { path, fingerprint } = job;
-            let (track, err, from_cache) = read_one(cache.as_deref(), &token, &path, fingerprint);
-            shared.tagged.fetch_add(1, Ordering::Relaxed);
-            match err {
-                None => {
-                    shared.succeeded.fetch_add(1, Ordering::Relaxed);
-                    if from_cache {
-                        shared.cached.fetch_add(1, Ordering::Relaxed);
+        workers.push(thread::spawn(move || {
+            loop {
+                let next = {
+                    let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.recv()
+                };
+                let Ok(job) = next else { break };
+                if cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let Job { path, fingerprint } = job;
+                let (track, err, from_cache) =
+                    read_one(cache.as_deref(), &token, &path, fingerprint);
+                shared.tagged.fetch_add(1, Ordering::Relaxed);
+                match err {
+                    None => {
+                        shared.succeeded.fetch_add(1, Ordering::Relaxed);
+                        if from_cache {
+                            shared.cached.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Some(reason) => {
+                        if let Ok(mut failed) = shared.failed.lock() {
+                            failed.push((path, reason));
+                        }
                     }
                 }
-                Some(reason) => {
-                    if let Ok(mut failed) = shared.failed.lock() {
-                        failed.push((path, reason));
-                    }
+                shared.add_row(&track, fingerprint);
+                if let Ok(guard) = shared.tx.lock() {
+                    let _drop = guard.send(ScanMessage::Track(track));
                 }
+                shared.report_progress(0, ScanPhase::Tagging);
             }
-            shared.add_row(&track, fingerprint);
-            if let Ok(guard) = shared.tx.lock() {
-                let _drop = guard.send(ScanMessage::Track(track));
-            }
-            shared.report_progress(0, ScanPhase::Tagging);
         }));
     }
 

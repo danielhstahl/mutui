@@ -183,11 +183,7 @@ pub fn contrast(a: Color, b: Color) -> f64 {
 pub fn saturation(color: Color) -> f64 {
     let (r, g, b) = rgb(color);
     let (max, min) = (r.max(g).max(b) as f64, r.min(g).min(b) as f64);
-    if max == 0.0 {
-        0.0
-    } else {
-        (max - min) / max
-    }
+    if max == 0.0 { 0.0 } else { (max - min) / max }
 }
 
 #[cfg(test)]

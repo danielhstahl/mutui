@@ -1,8 +1,8 @@
 [package]
 name = "music-tui"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.90"
 description = "Terminal music player with a folder-based library, mouse scrolling and click-to-play"
 license = "MIT"
 readme = "README.md"

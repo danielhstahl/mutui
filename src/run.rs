@@ -6,19 +6,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
-use crate::app::eventloop::{run_loop, CrosstermInput, Drawer, InputSource, TerminalDrawer};
+use crate::app::eventloop::{CrosstermInput, Drawer, InputSource, TerminalDrawer, run_loop};
 use crate::app::state::{AppState, Notice, Options};
 use crate::app::time::{Clock, SystemClock};
 use crate::audio::{
-    detect_backend, known_players_text, BoxedBackend, CommandBackend, MockBackend, NullBackend,
-    PlayerHandle,
+    BoxedBackend, CommandBackend, MockBackend, NullBackend, PlayerHandle, detect_backend,
+    known_players_text,
 };
 use crate::cli::{self, Cli};
 use crate::error::{Error, Result};
 use crate::library_cache::{self, LibraryCache};
-use crate::model::{dump_sorted_order, sort_tracks, Track};
+use crate::model::{Track, dump_sorted_order, sort_tracks};
 use crate::scan::{self, ScanConfig, ScanMessage};
 use crate::terminal::{self, TerminalGuard};
 
@@ -36,7 +36,10 @@ pub fn make_backend(kind: &str) -> (BoxedBackend, Option<String>) {
         "command" => match detect_backend() {
             Some(spec) => {
                 let label = spec.label.to_string();
-                (Box::new(CommandBackend::new(spec)), Some(format!("output: {label}")))
+                (
+                    Box::new(CommandBackend::new(spec)),
+                    Some(format!("output: {label}")),
+                )
             }
             None => (
                 Box::new(NullBackend::new()),
@@ -51,8 +54,11 @@ pub fn make_backend(kind: &str) -> (BoxedBackend, Option<String>) {
         _ => match detect_backend() {
             Some(spec) => {
                 let label = spec.label.to_string();
-                (Box::new(CommandBackend::new(spec)), Some(format!("output: {label}")))
-            },
+                (
+                    Box::new(CommandBackend::new(spec)),
+                    Some(format!("output: {label}")),
+                )
+            }
             None => (
                 Box::new(NullBackend::new()),
                 Some(format!(

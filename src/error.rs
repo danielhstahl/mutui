@@ -127,10 +127,12 @@ mod tests {
         assert_eq!(file.exit_code(), 2);
         assert_eq!(perms.exit_code(), 2);
         assert_eq!(Error::NotATty.exit_code(), 3);
-        assert!(!Error::Playback {
-            reason: "boom".into()
-        }
-        .footer_message()
-        .contains('\n'));
+        assert!(
+            !Error::Playback {
+                reason: "boom".into()
+            }
+            .footer_message()
+            .contains('\n')
+        );
     }
 }

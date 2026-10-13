@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use music_tui::model::{sort_tracks, Playlist, Track};
+use music_tui::model::{Playlist, Track, sort_tracks};
 use music_tui::scan::{self, ScanConfig, ScanMessage};
 use music_tui::testing::{FixtureFile, FixtureSet, FixtureTags, Format};
 

@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use music_tui::model::{sort_tracks, Track};
+use music_tui::model::{Track, sort_tracks};
 use music_tui::scan::{self, ScanConfig, ScanMessage, ScanPhase, ScanReport};
-use music_tui::testing::{wav_bytes, write_synthetic_library, FixtureFile, FixtureTags, Format};
+use music_tui::testing::{FixtureFile, FixtureTags, Format, wav_bytes, write_synthetic_library};
 
 fn collect(root: &Path, config: &ScanConfig) -> (Vec<Track>, ScanReport) {
     let (tx, rx) = mpsc::channel();
@@ -133,9 +133,11 @@ fn one_row_per_audio_file_with_correct_tags() {
     assert_eq!(first.disc_no, Some(1));
     assert_eq!(first.year, Some(1998));
     assert!(first.duration.is_some(), "wav duration should be readable");
-    assert!(first
-        .duration
-        .is_some_and(|d| d > Duration::from_millis(100)));
+    assert!(
+        first
+            .duration
+            .is_some_and(|d| d > Duration::from_millis(100))
+    );
     assert!(!first.corrupt);
 
     let compilation = find(&tracks, "comp/track3.mp3");

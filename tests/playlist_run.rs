@@ -1,6 +1,6 @@
 //! Artist-run / cursor tests (`mutu-2h8.7`), reusing the spec fixture table.
 
-use music_tui::model::{fixture_tracks, Playlist, RunEnded, Track};
+use music_tui::model::{Playlist, RunEnded, Track, fixture_tracks};
 
 fn playlist() -> Playlist {
     let mut tracks = fixture_tracks();

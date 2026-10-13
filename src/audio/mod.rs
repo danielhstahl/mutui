@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub use command_backend::{detect_backend, CommandBackend, PlayerSpec, KNOWN_PLAYERS};
+pub use command_backend::{CommandBackend, KNOWN_PLAYERS, PlayerSpec, detect_backend};
 pub use mock::{MockBackend, MockHandle};
 pub use null::NullBackend;
 

@@ -2,7 +2,7 @@
 //! exactly what the code does: the test parses the markdown table in §6 and
 //! compares it against `src/model/fixtures.rs` and the real comparator.
 
-use music_tui::model::{fixture_tracks, sort_tracks, FixtureRow, TABLE};
+use music_tui::model::{FixtureRow, TABLE, fixture_tracks, sort_tracks};
 
 /// One row parsed out of the markdown table.
 struct DocRow {

@@ -13,7 +13,7 @@ pub mod render;
 pub mod scroll;
 pub mod truncate;
 
-pub use layout::{areas, Areas};
-pub use mouse::{hit_test, HitContext, MouseAction};
+pub use layout::{Areas, areas};
+pub use mouse::{HitContext, MouseAction, hit_test};
 pub use render::{draw, render_lines};
 pub use scroll::{Scroll, Thumb, WHEEL_ROWS};

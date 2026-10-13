@@ -11,9 +11,9 @@ use std::path::Path;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 
 use crate::audio::{PlayerCommand, PlayerEvent};
-use crate::model::{sort_tracks, RunEnded};
+use crate::model::{RunEnded, sort_tracks};
 use crate::scan::{ScanMessage, ScanReport};
-use crate::ui::mouse::{hit_test, HitContext, MouseAction};
+use crate::ui::mouse::{HitContext, MouseAction, hit_test};
 
 use super::state::{AppState, Notice, Phase, PlaybackState, ScanStatus};
 use crate::scan::ScanPhase;

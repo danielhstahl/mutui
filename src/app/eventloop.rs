@@ -11,15 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEvent, MouseEvent};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use crate::audio::PlayerHandle;
 use crate::error::{Error, Result};
 use crate::scan::ScanMessage;
 use crate::ui::render;
 
-use super::reducer::{msg_from_event, reduce, Effect, Msg};
+use super::reducer::{Effect, Msg, msg_from_event, reduce};
 use super::state::AppState;
 use super::time::Clock;
 

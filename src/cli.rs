@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use crate::error::{Error, Result};
-use crate::scan::{ScanConfig, DEFAULT_EXTENSIONS};
+use crate::scan::{DEFAULT_EXTENSIONS, ScanConfig};
 
 /// The supported `--backend` values.
 pub const BACKENDS: &[&str] = &["auto", "command", "silent", "mock", "none"];
