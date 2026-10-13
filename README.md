@@ -4,9 +4,10 @@ A terminal music player for a folder of audio files.
 
 It does two things particularly well, and everything else supports them:
 
-1. **It sorts the folder into a sensible listening order** — artist, then album,
-   then disc, then track, then year, using natural number ordering
-   (`Album 2` before `Album 10`).
+1. **It sorts the folder into a sensible listening order** — artist, then each
+   album in release-year order, then disc, then track. An artist's records come
+   out the way they came out (a 1990 album before a 1995 one), and ties inside a
+   year use natural number ordering (`Album 2` before `Album 10`).
 2. **Clicking a song plays the rest of that artist, then stops.** After a track
    ends, the next song *of the same artist* starts automatically; when the last
    song of that artist is over the app stops and says so in the footer. It never
@@ -129,7 +130,8 @@ Extensions considered audio (override with `--extensions`):
 Tags are read with [lofty](https://crates.io/crates/lofty): title, artist,
 album, album artist, track, disc, year. Missing tags are never an error — a file
 with no tags still gets a row (sorted by artist `""`, then file name) and is
-played like any other. Hidden directories and dot-files are skipped.
+played like any other. An album with no year anywhere sorts first inside its
+artist. Hidden directories and dot-files are skipped.
 
 ## Backends
 

@@ -5,6 +5,23 @@ All notable changes to `music-tui` are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and the sort and
 playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
+## [Unreleased]
+
+### Fixed
+
+* **An artist's albums are now ordered by release year, not by album title**
+  (`mutu-172`). The sort key is artist → album year → album → disc → track →
+  row year → file name → path, so a 1990 record comes before a 1995 one even
+  when its title sorts later. The *album year* is the earliest year written
+  anywhere on that album, which is what keeps an album in one piece: deriving the
+  year per file would let a partly untagged 3-CD set shatter, its undated rows
+  (`0`) jumping to the front of the artist. Amends `docs/adr/0002` §3/§3.2 (the
+  §6 worked example changed with it, and `tests/adr_spec.rs` still checks code
+  against the document); `tests/album_year_order.rs` covers the scanned case and
+  a generated library where every artist, album and year combination is
+  scrambled. An album with no year at all sorts first inside its artist, and a
+  library with no years sorts exactly as it did before.
+
 ## [0.1.0]
 
 First release. Implements the epic `mutu-2h8`.

@@ -176,3 +176,35 @@ fn the_spec_documents_the_required_edge_cases() {
     }
     let _: Option<FixtureRow> = None;
 }
+
+/// The §3 priority table is the contract `SortKey::cmp` has to follow; a reader
+/// must be able to see at a glance that albums are dated before they are spelled
+/// (`mutu-172`).
+#[test]
+fn the_spec_orders_the_album_year_above_the_album_title() {
+    let field_at = |priority: &str| -> String {
+        for line in adr().lines() {
+            let cells: Vec<&str> = line
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect();
+            if cells.len() == 4 && cells[0] == priority {
+                return cells[1].to_string();
+            }
+        }
+        panic!("no priority {priority} row in the spec's sort-key table");
+    };
+    assert_eq!(field_at("1"), "sort artist");
+    assert_eq!(field_at("2"), "album year", "albums must be dated first");
+    assert_eq!(
+        field_at("3"),
+        "album",
+        "the title only breaks same-year ties"
+    );
+    assert!(
+        adr().contains("### 3.2 Album year"),
+        "§3.2 must explain where the album year comes from"
+    );
+}

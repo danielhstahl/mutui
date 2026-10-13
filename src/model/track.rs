@@ -73,6 +73,11 @@ impl Track {
     }
 
     /// Recompute the pre-computed sort key from the tag fields.
+    ///
+    /// This resets the album-wide `album_year` to the row's own year, because a
+    /// single row cannot know the rest of its album (ADR 0002 §3.2). Anything
+    /// that refreshes keys after sorting must call
+    /// [`crate::model::sort_tracks`] afterwards to restore album order.
     pub fn refresh_key(&mut self) {
         let artist_src = blank_to_none(self.album_artist.as_deref())
             .or_else(|| blank_to_none(self.artist.as_deref()))
@@ -85,10 +90,13 @@ impl Track {
             .unwrap_or_default();
         self.key = SortKey {
             artist: normalize(artist_src),
+            // Album-wide value: [`crate::model::sort_tracks`] replaces this
+            // per-row copy with the earliest year found anywhere on the album.
+            album_year: i64::from(self.year.unwrap_or_default()),
             album: normalize(album_src),
             disc: self.disc_no.unwrap_or(1),
             track: self.track_no.unwrap_or(TRACK_MISSING),
-            year: i64::from(self.year.unwrap_or(0)),
+            year: i64::from(self.year.unwrap_or_default()),
             name: normalize(&name),
             path: self
                 .path
@@ -179,7 +187,11 @@ mod tests {
         let t = Track::from_path(PathBuf::from("/m/a/1.mp3"));
         assert_eq!(t.key.disc, 1);
         assert_eq!(t.key.track, TRACK_MISSING);
-        assert_eq!(t.key.year, 0);
+        assert_eq!(t.key.year, 0, "missing year is the 0 sentinel");
+        assert_eq!(
+            t.key.album_year, 0,
+            "until sorted, the album year is the row's"
+        );
         assert_eq!(t.key.artist, "");
     }
 }

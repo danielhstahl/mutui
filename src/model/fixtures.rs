@@ -47,7 +47,7 @@ pub const TABLE: &[FixtureRow] = &[
     FixtureRow { file: "bw-double-d1t1.flac",   artist: Some("Beta Wave"), album_artist: None,            album: Some("Double"),   disc: Some(1), track: Some(1), year: Some(1994), run: 4 },
     FixtureRow { file: "bw-double-d1t2.flac",   artist: Some("Beta Wave"), album_artist: None,            album: Some("Double"),   disc: Some(1), track: Some(2), year: Some(1994), run: 4 },
     FixtureRow { file: "bw-double-d2t1.flac",   artist: Some("Beta Wave"), album_artist: None,            album: Some("Double"),   disc: Some(2), track: Some(1), year: Some(1994), run: 4 },
-    FixtureRow { file: "bw-double-d10t1.flac",  artist: Some("Beta Wave"), album_artist: None,            album: Some("Double"),   disc: Some(10), track: Some(1), year: Some(1994), run: 4 },
+    FixtureRow { file: "bw-double-d10t1.flac",  artist: Some("Beta Wave"), album_artist: None,            album: Some("Double"),   disc: Some(10), track: Some(1), year: None, run: 4 },
     FixtureRow { file: "bw-eleven-d1t1.mp3",    artist: Some("Beta Wave"), album_artist: None,            album: Some("Eleven"),   disc: Some(1), track: Some(1), year: Some(1996), run: 4 },
     // --- run 5: same artist through different casing / whitespace ------------
     FixtureRow { file: "beatles-red-d1t1.flac", artist: Some("The Beatles"), album_artist: None,          album: Some("1962-1966"), disc: Some(1), track: Some(1), year: Some(1973), run: 5 },
@@ -56,11 +56,11 @@ pub const TABLE: &[FixtureRow] = &[
     // --- run 6: compilation, grouped by album_artist --------------------------
     FixtureRow { file: "vox-tracks2.mp3",       artist: Some("Sister Hazel"), album_artist: Some("Various Artists"), album: Some("Tracks Of 2"),  disc: Some(1), track: Some(3), year: Some(2002), run: 6 },
     FixtureRow { file: "vox-tracks10.mp3",      artist: Some("Guster"),       album_artist: Some("Various Artists"), album: Some("Tracks Of 10"), disc: Some(1), track: Some(1), year: Some(2002), run: 6 },
-    // --- run 7: year tiebreak for otherwise identical keys --------------------
+    // --- run 7: album year beats the album title; year splits identical keys ---
+    FixtureRow { file: "zeta-works2-d1t2.mp3",  artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Works 2"),  disc: Some(1), track: Some(2), year: Some(2007), run: 7 },
+    FixtureRow { file: "zeta-works10-d1t10.mp3",artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Works 10"), disc: Some(1), track: Some(10), year: Some(2007), run: 7 },
     FixtureRow { file: "zeta-same-a.mp3",       artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Same"),     disc: None, track: None, year: Some(2009), run: 7 },
     FixtureRow { file: "zeta-same-b.mp3",       artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Same"),     disc: None, track: None, year: Some(2011), run: 7 },
-    FixtureRow { file: "zeta-works2-d1t2.mp3",  artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Works 2"),  disc: Some(1), track: Some(2), year: Some(2009), run: 7 },
-    FixtureRow { file: "zeta-works10-d1t10.mp3",artist: Some("Zeta Nine"),  album_artist: None,           album: Some("Works 10"), disc: Some(1), track: Some(10), year: Some(2009), run: 7 },
 ];
 
 /// The table as `Vec` (kept for symmetry with [`fixture_tracks`]).

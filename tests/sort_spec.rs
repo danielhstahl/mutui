@@ -56,6 +56,12 @@ fn every_field_of_the_table_is_applied() {
     assert_eq!(same.key.year, 2009);
     // year breaks the tie between two otherwise identical keys
     assert!(by_file("zeta-same-a.mp3").key < by_file("zeta-same-b.mp3").key);
+    // album year beats the album title: *Works* (2007) before *Same* (2009)
+    assert!(by_file("zeta-works2-d1t2.mp3").key < by_file("zeta-same-a.mp3").key);
+    // a row with no year still carries its album's year (spec §3.2)
+    assert_eq!(by_file("bw-double-d10t1.flac").key.year, 0);
+    assert_eq!(by_file("bw-double-d10t1.flac").key.album_year, 1994);
+    assert_eq!(by_file("zeta-same-a.mp3").key.album_year, 2009);
     // natural album numbers
     assert!(by_file("ab-album1-d1t1.mp3").key < by_file("ab-album2-d1t1.mp3").key);
     assert!(by_file("ab-album2-d1t1.mp3").key < by_file("ab-album10-d1t1.mp3").key);

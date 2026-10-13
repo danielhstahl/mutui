@@ -2,13 +2,20 @@
 //!
 //! This is the normative implementation of `docs/adr/0002-sort-and-artist-run.md`.
 //! Comparison allocates nothing: tokens are borrowed sub-slices of the
-//! pre-computed, already-normalized key strings.
+//! pre-computed, already-normalized key strings. The only allocating step is
+//! [`sort_tracks`] working out each album's release year ([`apply_album_years`]),
+//! which happens once per scan rather than once per comparison.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 /// Sentinel used when a file has no track number (untagged files land last
 /// inside their album, see the sort spec §3).
 pub const TRACK_MISSING: u32 = u32::MAX;
+
+/// Sentinel used when neither a track nor any of its album-mates carry a year
+/// (an undated release lands first inside its artist, see the sort spec §3.2).
+pub const YEAR_MISSING: i64 = 0;
 
 /// Normalize a tag value for comparison and for artist-run equality:
 /// trim, collapse internal whitespace runs to a single space, lowercase
@@ -134,20 +141,31 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 
 /// The pre-computed sort key of a track (sort spec §2/§3).
 ///
-/// Comparison priority: artist, album, disc, track, year, file name, full path.
+/// Comparison priority: artist, album year, album, disc, track, year, file
+/// name, full path — so an artist's albums play in release order (§3.2) and
+/// the tracks inside one album stay together.
+///
 /// Missing tags use the sentinels fixed by the spec: empty string (artist,
-/// album), `1` (disc), [`TRACK_MISSING`] (track), `0` (year).
+/// album), `1` (disc), [`TRACK_MISSING`] (track), [`YEAR_MISSING`] (year,
+/// album year).
+///
+/// [`SortKey::album_year`] is a property of the *album*, not of the row: it is
+/// filled in for the whole library by [`sort_tracks`], which is the only way to
+/// know every year written on an album.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SortKey {
     /// Normalized `album_artist` else `artist` (`""` when untagged).
     pub artist: String,
+    /// Earliest year found anywhere on this row's album, [`YEAR_MISSING`] when
+    /// the album is undated. Written by [`sort_tracks`].
+    pub album_year: i64,
     /// Normalized album title (`""` when untagged).
     pub album: String,
     /// Disc number, `1` when missing.
     pub disc: u32,
     /// Track number, [`TRACK_MISSING`] when missing.
     pub track: u32,
-    /// Release year, `0` when missing (sorts first inside its group).
+    /// Release year of this row, `0` when missing (breaks ties inside an album).
     pub year: i64,
     /// File name — first deterministic tiebreaker.
     pub name: String,
@@ -158,6 +176,9 @@ pub struct SortKey {
 impl Ord for SortKey {
     fn cmp(&self, other: &Self) -> Ordering {
         natural_cmp(&self.artist, &other.artist)
+            // Albums are ordered by when they came out, not alphabetically;
+            // the album title only breaks ties between same-year releases.
+            .then_with(|| self.album_year.cmp(&other.album_year))
             .then_with(|| natural_cmp(&self.album, &other.album))
             .then_with(|| self.disc.cmp(&other.disc))
             .then_with(|| self.track.cmp(&other.track))
@@ -165,6 +186,48 @@ impl Ord for SortKey {
             .then_with(|| natural_cmp(&self.name, &other.name))
             .then_with(|| natural_cmp(&self.path, &other.path))
     }
+}
+
+/// Give every row the release year of its album (sort spec §3.2).
+///
+/// An *album* is the pair (sort artist, album title); its year is the earliest
+/// non-zero year written on any of its rows, `0` when the album carries no year
+/// at all. Deriving it per row would split an album whose discs disagree on the
+/// year — or whose files are partly untagged — into as many pieces as it has
+/// distinct years, so the value has to be derived from the whole library at
+/// once. This is the only part of sorting that allocates; the comparator itself
+/// never does.
+pub fn apply_album_years(tracks: &mut [crate::model::Track]) {
+    let years = album_years(tracks);
+    for (track, year) in tracks.iter_mut().zip(years) {
+        track.key.album_year = year;
+    }
+}
+
+/// Earliest non-zero year of each row's album, one value per row (index-matched
+/// to `tracks`). Split out so the borrows of the lookup map end before the rows
+/// are written back.
+fn album_years(tracks: &[crate::model::Track]) -> Vec<i64> {
+    let mut earliest: HashMap<(&str, &str), i64> = HashMap::new();
+    for track in tracks {
+        let year = track.key.year;
+        if year == YEAR_MISSING {
+            continue;
+        }
+        earliest
+            .entry((track.key.artist.as_str(), track.key.album.as_str()))
+            .and_modify(|seen| *seen = (*seen).min(year))
+            .or_insert(year);
+    }
+    tracks
+        .iter()
+        .map(|track| {
+            earliest
+                .get(&(track.key.artist.as_str(), track.key.album.as_str()))
+                .copied()
+                .unwrap_or(YEAR_MISSING)
+        })
+        .collect()
 }
 
 impl PartialOrd for SortKey {
@@ -175,7 +238,12 @@ impl PartialOrd for SortKey {
 
 /// Sort a library into the canonical order. Uses a stable sort and a key that
 /// ends in the full path, so the result never changes between runs.
+///
+/// This is the function that establishes the album-year key ([`apply_album_years`]
+/// runs first), so a key built by [`crate::model::Track::refresh_key`] alone is
+/// only *almost* comparable: always sort before relying on album order.
 pub fn sort_tracks(tracks: &mut [crate::model::Track]) {
+    apply_album_years(tracks);
     tracks.sort_by(|a, b| a.key.cmp(&b.key));
 }
 
@@ -198,7 +266,7 @@ pub fn dump_sorted_order(tracks: &[crate::model::Track]) -> String {
                 } else {
                     t.key.track.to_string()
                 },
-                if t.key.year == 0 {
+                if t.key.year == YEAR_MISSING {
                     String::new()
                 } else {
                     t.key.year.to_string()
@@ -281,5 +349,139 @@ mod tests {
             ]
         );
         assert_eq!(NaturalTokens::new("").next(), None);
+    }
+
+    /// One row for the album-year tests below.
+    fn song(
+        artist: &str,
+        album: &str,
+        disc: u32,
+        track_no: u32,
+        year: Option<i32>,
+        file: &str,
+    ) -> crate::model::Track {
+        let mut track =
+            crate::model::Track::from_path(std::path::PathBuf::from("/music").join(file));
+        track.artist = Some(artist.to_string());
+        track.album = Some(album.to_string());
+        track.disc_no = Some(disc);
+        track.track_no = Some(track_no);
+        track.year = year;
+        track.refresh_key();
+        track
+    }
+
+    fn albums(tracks: &[crate::model::Track]) -> Vec<String> {
+        tracks
+            .iter()
+            .map(|t| t.display_album().to_string())
+            .collect()
+    }
+
+    fn album_years(tracks: &[crate::model::Track]) -> Vec<i64> {
+        tracks.iter().map(|t| t.key.album_year).collect()
+    }
+
+    #[test]
+    fn albums_order_by_year_inside_an_artist() {
+        // Titles chosen so that alphabetical order is the reverse of release
+        // order: sorting by title alone (the old key order) gets this wrong.
+        let mut tracks = vec![
+            song("Delta", "Zebra Years", 1, 1, Some(2001), "a.mp3"),
+            song("Delta", "Middle Years", 1, 1, Some(2008), "b.mp3"),
+            song("Delta", "Alpha Years", 1, 1, Some(2015), "c.mp3"),
+        ];
+        tracks.reverse();
+        sort_tracks(&mut tracks);
+        assert_eq!(
+            albums(&tracks),
+            ["Zebra Years", "Middle Years", "Alpha Years"]
+        );
+        assert_eq!(album_years(&tracks), [2001, 2008, 2015]);
+    }
+
+    #[test]
+    fn an_album_stays_whole_when_its_rows_disagree_on_the_year() {
+        let mut tracks = vec![
+            song("Echo", "Warm Up", 1, 1, Some(1988), "d.mp3"),
+            song("Echo", "Box Set", 1, 1, Some(1990), "a.mp3"),
+            song("Echo", "Box Set", 2, 1, Some(1992), "b.mp3"),
+            song("Echo", "Box Set", 2, 2, None, "c.mp3"),
+        ];
+        sort_tracks(&mut tracks);
+        // The undated disc-2 track must not escape to the front of the artist,
+        // and the box set must not split around "Warm Up".
+        assert_eq!(
+            albums(&tracks),
+            ["Warm Up", "Box Set", "Box Set", "Box Set"]
+        );
+        assert_eq!(album_years(&tracks), [1988, 1990, 1990, 1990]);
+        let numbers: Vec<(u32, u32)> = tracks
+            .iter()
+            .skip(1)
+            .map(|t| (t.key.disc, t.key.track))
+            .collect();
+        assert_eq!(
+            numbers,
+            [(1, 1), (2, 1), (2, 2)],
+            "disc then track inside an album"
+        );
+    }
+
+    #[test]
+    fn undated_albums_come_first_inside_the_artist_then_sort_by_title() {
+        let mut tracks = vec![
+            song("Foxtrot", "Dated", 1, 1, Some(1999), "a.mp3"),
+            song("Foxtrot", "Undated Two", 1, 1, None, "b.mp3"),
+            song("Foxtrot", "Undated One", 1, 1, None, "c.mp3"),
+        ];
+        sort_tracks(&mut tracks);
+        assert_eq!(
+            albums(&tracks),
+            ["Undated One", "Undated Two", "Dated"],
+            "year 0 is the missing sentinel, so an undated release leads"
+        );
+    }
+
+    #[test]
+    fn same_year_albums_fall_back_to_natural_title_order() {
+        let mut tracks = vec![
+            song("Gina", "Works 10", 1, 1, Some(2004), "a.mp3"),
+            song("Gina", "Works 2", 1, 1, Some(2004), "b.mp3"),
+        ];
+        sort_tracks(&mut tracks);
+        assert_eq!(albums(&tracks), ["Works 2", "Works 10"]);
+    }
+
+    #[test]
+    fn album_year_is_scoped_to_its_own_artist() {
+        // Two artists, one album title: neither may borrow the other's year.
+        let mut tracks = vec![
+            song("Artist A", "Self Titled", 1, 1, Some(2010), "a.mp3"),
+            song("Artist B", "Self Titled", 1, 1, Some(1990), "b.mp3"),
+        ];
+        sort_tracks(&mut tracks);
+        assert_eq!(albums(&tracks), ["Self Titled", "Self Titled"]);
+        assert_eq!(
+            album_years(&tracks),
+            [2010, 1990],
+            "artists sort first, and each 'Self Titled' keeps its own year"
+        );
+    }
+
+    #[test]
+    fn sorting_twice_is_a_no_op_for_album_years_too() {
+        let mut tracks = vec![
+            song("Delta", "Zebra Years", 1, 1, Some(2001), "a.mp3"),
+            song("Delta", "Alpha Years", 1, 1, Some(2015), "b.mp3"),
+            song("Delta", "Alpha Years", 1, 2, None, "c.mp3"),
+        ];
+        sort_tracks(&mut tracks);
+        let once = albums(&tracks);
+        let years = album_years(&tracks);
+        apply_album_years(&mut tracks);
+        sort_tracks(&mut tracks);
+        assert_eq!(albums(&tracks), once);
+        assert_eq!(album_years(&tracks), years);
     }
 }
