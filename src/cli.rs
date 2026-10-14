@@ -150,10 +150,10 @@ pub fn validate_folder(input: &Path) -> Result<PathBuf> {
 /// Default log file location (documented in the README).
 #[must_use]
 pub fn default_log_path() -> PathBuf {
-    if let Ok(state) = std::env::var("XDG_STATE_HOME") {
-        if !state.is_empty() {
-            return PathBuf::from(state).join("music-tui").join("music-tui.log");
-        }
+    if let Ok(state) = std::env::var("XDG_STATE_HOME")
+        && !state.is_empty()
+    {
+        return PathBuf::from(state).join("music-tui").join("music-tui.log");
     }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))

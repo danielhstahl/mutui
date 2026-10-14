@@ -209,11 +209,11 @@ pub fn run_loop(
 
     loop {
         iterations += 1;
-        if let Some(limit) = max_iterations {
-            if iterations > limit {
-                tracing::warn!("event loop hit its iteration limit; forcing quit");
-                break;
-            }
+        if let Some(limit) = max_iterations
+            && iterations > limit
+        {
+            tracing::warn!("event loop hit its iteration limit; forcing quit");
+            break;
         }
         let now = clock.now();
         let mut effects: Vec<Effect> = Vec::new();

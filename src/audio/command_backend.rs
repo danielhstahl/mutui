@@ -133,10 +133,9 @@ impl PlayerSpec {
                     args.push(format!("--volume={}", (volume * 100.0).round() as i32));
                 }
                 if let (SeekArg::Seconds, Some(secs)) = (self.seek, start.map(|s| s.as_secs_f64()))
+                    && secs > 0.0
                 {
-                    if secs > 0.0 {
-                        args.push(format!("--start={secs:.3}"));
-                    }
+                    args.push(format!("--start={secs:.3}"));
                 }
             }
             "ffplay" => {
@@ -150,10 +149,9 @@ impl PlayerSpec {
                     args.extend(["-volume".into(), (volume * 100.0).round().to_string()]);
                 }
                 if let (SeekArg::Seconds, Some(secs)) = (self.seek, start.map(|s| s.as_secs_f64()))
+                    && secs > 0.0
                 {
-                    if secs > 0.0 {
-                        args.extend(["-ss".into(), format!("{secs:.3}")]);
-                    }
+                    args.extend(["-ss".into(), format!("{secs:.3}")]);
                 }
             }
             "mplayer" => {
@@ -162,10 +160,9 @@ impl PlayerSpec {
                     args.extend(["-volume".into(), (volume * 100.0).round().to_string()]);
                 }
                 if let (SeekArg::Seconds, Some(secs)) = (self.seek, start.map(|s| s.as_secs_f64()))
+                    && secs > 0.0
                 {
-                    if secs > 0.0 {
-                        args.extend(["-ss".into(), format!("{secs:.3}")]);
-                    }
+                    args.extend(["-ss".into(), format!("{secs:.3}")]);
                 }
             }
             "mpg123" => {
@@ -186,17 +183,16 @@ impl PlayerSpec {
             "madplay" => {
                 args.push("-q".into());
                 if let (SeekArg::Seconds, Some(secs)) = (self.seek, start.map(|s| s.as_secs_f64()))
+                    && secs > 0.0
                 {
-                    if secs > 0.0 {
-                        args.push(format!("--resume={secs:.3}"));
-                    }
+                    args.push(format!("--resume={secs:.3}"));
                 }
             }
             "afplay" => {
-                if let Some(secs) = start.map(|s| s.as_secs_f64()) {
-                    if secs > 0.0 {
-                        args.extend(["-a".into(), format!("{secs:.3}")]);
-                    }
+                if let Some(secs) = start.map(|s| s.as_secs_f64())
+                    && secs > 0.0
+                {
+                    args.extend(["-a".into(), format!("{secs:.3}")]);
                 }
                 if self.volume != VolumeArg::None {
                     args.extend(["-v".into(), format!("{:.3}", volume.clamp(0.0, 1.0))]);
@@ -402,28 +398,28 @@ impl Backend for CommandBackend {
     }
 
     fn poll(&mut self) -> Vec<PlayerEvent> {
-        if let Some(child) = self.child.as_mut() {
-            if let Ok(Some(status)) = child.try_wait() {
-                let track_id = self.track_id;
-                self.child = None;
-                self.anchor = None;
-                self.path = None;
-                self.paused_at = None;
-                if status.success() {
-                    self.pending.push(PlayerEvent::Finished { track_id });
-                } else {
-                    let code = status
-                        .code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "signal".to_string());
-                    self.pending.push(PlayerEvent::Failed {
-                        track_id,
-                        reason: format!(
-                            "{} exited with {code} (unsupported or unreadable file)",
-                            self.spec.label
-                        ),
-                    });
-                }
+        if let Some(child) = self.child.as_mut()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            let track_id = self.track_id;
+            self.child = None;
+            self.anchor = None;
+            self.path = None;
+            self.paused_at = None;
+            if status.success() {
+                self.pending.push(PlayerEvent::Finished { track_id });
+            } else {
+                let code = status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                self.pending.push(PlayerEvent::Failed {
+                    track_id,
+                    reason: format!(
+                        "{} exited with {code} (unsupported or unreadable file)",
+                        self.spec.label
+                    ),
+                });
             }
         }
         if self.child.is_some() && self.paused_at.is_none() {

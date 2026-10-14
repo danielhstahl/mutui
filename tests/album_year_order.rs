@@ -306,14 +306,15 @@ fn generated_libraries_sort_into_whole_artists_and_whole_albums() {
             track.key.disc,
             track.key.track,
         );
-        if let Some((artist, album, disc, number)) = previous {
-            if artist == here.0 && album == here.1 {
-                assert!(
-                    (disc, number) <= (here.2, here.3),
-                    "disc/track order broken: {:?}",
-                    labels(&tracks)
-                );
-            }
+        if let Some((artist, album, disc, number)) = previous
+            && artist == here.0
+            && album == here.1
+        {
+            assert!(
+                (disc, number) <= (here.2, here.3),
+                "disc/track order broken: {:?}",
+                labels(&tracks)
+            );
         }
         previous = Some((here.0, here.1, here.2, here.3));
     }

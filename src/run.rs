@@ -104,10 +104,8 @@ impl ScanJob {
     /// re-read every tag, then write the index again.
     pub fn restart(&mut self, force: bool) {
         self.cancel.store(true, Ordering::SeqCst);
-        if force {
-            if let Some(cache) = &self.config.cache {
-                cache.force_full_scan();
-            }
+        if force && let Some(cache) = &self.config.cache {
+            cache.force_full_scan();
         }
         let (tx, rx) = mpsc::channel();
         self.cancel = Arc::new(AtomicBool::new(false));

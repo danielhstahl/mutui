@@ -554,23 +554,25 @@ pub fn scan(
     // Refresh the index, but never from a partial scan: a scan that stopped at a
     // cap (or was cancelled) did not see most of the library, and pruning to
     // what it did see would quietly lose rows.
-    if let Some(cache) = cfg.cache.as_ref() {
-        if !report.capped && !report.entry_capped && !report.cancelled {
-            match cache.save(&token, report.digest) {
-                Ok(wrote) => {
-                    tracing::debug!(
-                        wrote,
-                        path = %cache.path().display(),
-                        "library index up to date"
-                    );
-                    report.cache_file = Some(cache.path().to_path_buf());
-                }
-                Err(reason) => tracing::warn!(
-                    reason = %reason,
+    if let Some(cache) = cfg.cache.as_ref()
+        && !report.capped
+        && !report.entry_capped
+        && !report.cancelled
+    {
+        match cache.save(&token, report.digest) {
+            Ok(wrote) => {
+                tracing::debug!(
+                    wrote,
                     path = %cache.path().display(),
-                    "could not write the library index"
-                ),
+                    "library index up to date"
+                );
+                report.cache_file = Some(cache.path().to_path_buf());
             }
+            Err(reason) => tracing::warn!(
+                reason = %reason,
+                path = %cache.path().display(),
+                "could not write the library index"
+            ),
         }
     }
 
