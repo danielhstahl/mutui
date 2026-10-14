@@ -89,7 +89,7 @@ to keep the mouse entirely to the terminal.
 | `r` / shift-`R` | rescan the folder (shift-`R` re-reads every tag from disk) |
 | `?` or `F1` | help overlay |
 
-### Colours
+### Colors
 
 The palette is chosen for a black terminal and lives in `src/ui/palette.rs` —
 named by meaning (`ACCENT`, `MUTED`, `STATE_PLAYING`, …) instead of scattered

@@ -7,7 +7,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_music-tui"))
+    Command::new(env!("CARGO_BIN_EXE_mutui"))
 }
 
 fn run<I, S>(args: I, stdin_empty: bool) -> Output
@@ -375,7 +375,7 @@ fn pty_screen(folder: &Path, extra: &[&str], hold_ms: u64, tag: &str) -> String 
         std::env::temp_dir().join(format!("music-tui-pty-{}-{}.log", std::process::id(), tag));
     let mut inner = format!(
         "stty rows 24 cols 80; {} --backend silent --log-file {}",
-        env!("CARGO_BIN_EXE_music-tui"),
+        env!("CARGO_BIN_EXE_mutui"),
         log.display()
     );
     for arg in extra {

@@ -8,7 +8,7 @@ license = "MIT"
 readme = "README.md"
 
 [[bin]]
-name = "music-tui"
+name = "mutui"
 path = "src/main.rs"
 
 [lib]
