@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use lofty::config::WriteOptions;
 use lofty::prelude::{Accessor as _, AudioFile as _, ItemKey, TaggedFileExt as _};
-use lofty::tag::items::Timestamp;
 use lofty::tag::Tag;
+use lofty::tag::items::Timestamp;
 
 /// Tag values to write into a generated file.
 #[derive(Debug, Clone, Default)]
@@ -96,7 +96,7 @@ pub fn mp3_bytes(seconds: f32) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(frames * frame_len);
     for _ in 0..frames.max(1) {
         out.extend_from_slice(&header);
-        while out.len() % frame_len != 0 {
+        while !out.len().is_multiple_of(frame_len) {
             out.push(0);
         }
     }
@@ -421,10 +421,10 @@ pub fn write_synthetic_library(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     for fixture in synthetic_library() {
         // The two non-audio fixtures are written as real text/image bytes.
         let path = write_fixture(root, &fixture)?;
-        if let Some(ext) = path.extension() {
-            if ext == "txt" || ext == "jpg" {
-                std::fs::write(&path, b"not audio, and must be ignored")?;
-            }
+        if let Some(ext) = path.extension()
+            && (ext == "txt" || ext == "jpg")
+        {
+            std::fs::write(&path, b"not audio, and must be ignored")?;
         }
         paths.push(path);
     }

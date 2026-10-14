@@ -7,7 +7,7 @@ use crate::audio::PlayerCommand;
 use crate::model::Playlist;
 use crate::scan::{ScanPhase, ScanReport};
 use crate::ui::scroll::Scroll;
-use crate::ui::{areas, Areas};
+use crate::ui::{Areas, areas};
 
 /// How long a transient footer message stays visible.
 pub const NOTICE_TTL: Duration = Duration::from_secs(6);

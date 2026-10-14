@@ -6,11 +6,11 @@ pub mod state;
 pub mod time;
 
 pub use eventloop::{
-    run_loop, CaptureDrawer, CrosstermInput, Drawer, Input, InputSource, ScriptedInput,
-    TerminalDrawer, TICK,
+    CaptureDrawer, CrosstermInput, Drawer, Input, InputSource, ScriptedInput, TICK, TerminalDrawer,
+    run_loop,
 };
-pub use reducer::{msg_from_event, reduce, Effect, Msg, DEBOUNCE_MS, MAX_CONSECUTIVE_FAILURES};
+pub use reducer::{DEBOUNCE_MS, Effect, MAX_CONSECUTIVE_FAILURES, Msg, msg_from_event, reduce};
 pub use state::{
-    AppState, Notice, NoticeLevel, Options, Phase, PlaybackState, ScanStatus, NOTICE_TTL,
+    AppState, NOTICE_TTL, Notice, NoticeLevel, Options, Phase, PlaybackState, ScanStatus,
 };
-pub use time::{now_ms, Clock, FakeClock, SystemClock};
+pub use time::{Clock, FakeClock, SystemClock, now_ms};

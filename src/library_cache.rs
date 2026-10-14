@@ -39,11 +39,11 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::model::{SortKey, Track, SORT_ALGORITHM};
+use crate::model::{SORT_ALGORITHM, SortKey, Track};
 use crate::scan::ScanConfig;
 
 /// File layout version. Bump when [`write_row`] changes shape.

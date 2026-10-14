@@ -19,15 +19,15 @@ use crate::error::{Error, Result};
 /// Level: `RUST_LOG` if set, otherwise `debug` with `--debug` and `warn`
 /// otherwise (the app is interactive; we do not want per-event sync overhead).
 pub fn init(path: &Path, debug: bool) -> Result<PathBuf> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| {
-                Error::Other(format!(
-                    "cannot create log directory {}: {err}",
-                    parent.display()
-                ))
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::Other(format!(
+                "cannot create log directory {}: {err}",
+                parent.display()
+            ))
+        })?;
     }
     let file = OpenOptions::new()
         .create(true)

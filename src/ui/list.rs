@@ -1,10 +1,10 @@
 //! The song list: one row per track, only the visible window is rendered.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
-use ratatui::Frame;
 
 use crate::app::state::{AppState, PlaybackState};
 use crate::model::Track;
@@ -92,19 +92,11 @@ pub fn marker(flags: RowFlags, corrupt: bool) -> char {
     if corrupt {
         '!'
     } else if flags.playing {
-        if flags.ascii {
-            '>'
-        } else {
-            '▶'
-        }
+        if flags.ascii { '>' } else { '▶' }
     } else if flags.paused {
         '|'
     } else if flags.selected {
-        if flags.ascii {
-            '*'
-        } else {
-            '•'
-        }
+        if flags.ascii { '*' } else { '•' }
     } else {
         ' '
     }

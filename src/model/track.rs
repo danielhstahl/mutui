@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::sort::{normalize, SortKey, TRACK_MISSING};
+use super::sort::{SortKey, TRACK_MISSING, normalize};
 
 /// One row of the library: an audio file plus its (possibly missing) tags.
 ///

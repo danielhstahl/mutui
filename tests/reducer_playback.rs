@@ -8,9 +8,9 @@ use crossterm::event::{
     MouseEventKind,
 };
 
-use music_tui::app::{reduce, AppState, Effect, Msg, Notice, Options, PlaybackState, DEBOUNCE_MS};
+use music_tui::app::{AppState, DEBOUNCE_MS, Effect, Msg, Notice, Options, PlaybackState, reduce};
 use music_tui::audio::{PlayerCommand, PlayerEvent};
-use music_tui::model::{fixture_tracks, sort_tracks, Playlist};
+use music_tui::model::{Playlist, fixture_tracks, sort_tracks};
 use music_tui::scan::{ScanMessage, ScanPhase, ScanProgress, ScanReport};
 
 fn key(code: KeyCode) -> Msg {
@@ -154,11 +154,12 @@ fn click_mid_run_then_auto_advance_in_sorted_order_and_stop_at_artist_end() {
         notice.text
     );
     assert_eq!(app.end_of_artist.as_deref(), Some("Alpha Beta"));
-    assert!(app
-        .playlist
-        .tracks()
-        .iter()
-        .any(|t| t.display_artist() == "Alpha Beta"));
+    assert!(
+        app.playlist
+            .tracks()
+            .iter()
+            .any(|t| t.display_artist() == "Alpha Beta")
+    );
 }
 
 #[test]
@@ -172,10 +173,11 @@ fn clicking_the_last_row_of_an_artist_plays_it_and_stops() {
     let effects = finish(&mut app, 1500);
     assert_eq!(app.playback, PlaybackState::Idle);
     assert!(effects.contains(&Effect::Command(PlayerCommand::Stop)));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("End of artist")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("End of artist"))
+    );
 }
 
 #[test]
@@ -250,10 +252,11 @@ fn corrupt_file_is_skipped_once_then_the_run_continues() {
         app.playback,
         PlaybackState::Playing { index: 4, .. }
     ));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("Skipping") && n.text.contains("unsupported codec")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("Skipping") && n.text.contains("unsupported codec"))
+    );
     assert!(!effects.is_empty(), "the skip must issue a play command");
 }
 
@@ -285,10 +288,11 @@ fn two_consecutive_failures_stop_the_run() {
     );
     assert_eq!(app.playback, PlaybackState::Idle);
     assert!(effects.contains(&Effect::Command(PlayerCommand::Stop)));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("unreadable")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("unreadable"))
+    );
 }
 
 #[test]
@@ -447,10 +451,11 @@ fn next_and_previous_stay_inside_the_run() {
     let effects = reduce(&mut app, key(KeyCode::Char('p')), 1300);
     assert!(effects.is_empty());
     assert_eq!(app.playlist.cursor(), Some(3));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("Start of run")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("Start of run"))
+    );
     // Jump to the end of the run and press n: refuse, do not wrap.
     reduce(
         &mut app,
@@ -460,10 +465,11 @@ fn next_and_previous_stay_inside_the_run() {
     let effects = reduce(&mut app, key(KeyCode::Char('n')), 1500);
     assert!(effects.is_empty());
     assert_eq!(app.playlist.cursor(), Some(7));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("End of run")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("End of run"))
+    );
 }
 
 #[test]
@@ -651,20 +657,24 @@ fn resize_reclamps_the_scroll_state() {
 
 #[test]
 fn events_convert_into_messages() {
-    assert!(music_tui::app::msg_from_event(Event::Key(KeyEvent {
-        code: KeyCode::Char('q'),
-        modifiers: KeyModifiers::NONE,
-        kind: KeyEventKind::Press,
-        state: KeyEventState::NONE,
-    }))
-    .is_some());
-    assert!(music_tui::app::msg_from_event(Event::Key(KeyEvent {
-        code: KeyCode::Char('q'),
-        modifiers: KeyModifiers::NONE,
-        kind: KeyEventKind::Release,
-        state: KeyEventState::NONE,
-    }))
-    .is_none());
+    assert!(
+        music_tui::app::msg_from_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }))
+        .is_some()
+    );
+    assert!(
+        music_tui::app::msg_from_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        }))
+        .is_none()
+    );
     assert!(music_tui::app::msg_from_event(Event::Resize(80, 24)).is_some());
 }
 

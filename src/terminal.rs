@@ -6,8 +6,8 @@
 //! screen buffer restored.
 
 use std::io::{self, Stdout, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{cursor, execute, terminal};
 

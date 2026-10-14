@@ -430,36 +430,39 @@ pub fn scan(
         let shared = Arc::clone(&shared);
         let cancel = Arc::clone(cancel);
         let cache = cfg.cache.clone();
-        workers.push(thread::spawn(move || loop {
-            let next = {
-                let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.recv()
-            };
-            let Ok(job) = next else { break };
-            if cancel.load(Ordering::Relaxed) {
-                continue;
-            }
-            let Job { path, fingerprint } = job;
-            let (track, err, from_cache) = read_one(cache.as_deref(), &token, &path, fingerprint);
-            shared.tagged.fetch_add(1, Ordering::Relaxed);
-            match err {
-                None => {
-                    shared.succeeded.fetch_add(1, Ordering::Relaxed);
-                    if from_cache {
-                        shared.cached.fetch_add(1, Ordering::Relaxed);
+        workers.push(thread::spawn(move || {
+            loop {
+                let next = {
+                    let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard.recv()
+                };
+                let Ok(job) = next else { break };
+                if cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let Job { path, fingerprint } = job;
+                let (track, err, from_cache) =
+                    read_one(cache.as_deref(), &token, &path, fingerprint);
+                shared.tagged.fetch_add(1, Ordering::Relaxed);
+                match err {
+                    None => {
+                        shared.succeeded.fetch_add(1, Ordering::Relaxed);
+                        if from_cache {
+                            shared.cached.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Some(reason) => {
+                        if let Ok(mut failed) = shared.failed.lock() {
+                            failed.push((path, reason));
+                        }
                     }
                 }
-                Some(reason) => {
-                    if let Ok(mut failed) = shared.failed.lock() {
-                        failed.push((path, reason));
-                    }
+                shared.add_row(&track, fingerprint);
+                if let Ok(guard) = shared.tx.lock() {
+                    let _drop = guard.send(ScanMessage::Track(track));
                 }
+                shared.report_progress(0, ScanPhase::Tagging);
             }
-            shared.add_row(&track, fingerprint);
-            if let Ok(guard) = shared.tx.lock() {
-                let _drop = guard.send(ScanMessage::Track(track));
-            }
-            shared.report_progress(0, ScanPhase::Tagging);
         }));
     }
 
@@ -551,23 +554,25 @@ pub fn scan(
     // Refresh the index, but never from a partial scan: a scan that stopped at a
     // cap (or was cancelled) did not see most of the library, and pruning to
     // what it did see would quietly lose rows.
-    if let Some(cache) = cfg.cache.as_ref() {
-        if !report.capped && !report.entry_capped && !report.cancelled {
-            match cache.save(&token, report.digest) {
-                Ok(wrote) => {
-                    tracing::debug!(
-                        wrote,
-                        path = %cache.path().display(),
-                        "library index up to date"
-                    );
-                    report.cache_file = Some(cache.path().to_path_buf());
-                }
-                Err(reason) => tracing::warn!(
-                    reason = %reason,
+    if let Some(cache) = cfg.cache.as_ref()
+        && !report.capped
+        && !report.entry_capped
+        && !report.cancelled
+    {
+        match cache.save(&token, report.digest) {
+            Ok(wrote) => {
+                tracing::debug!(
+                    wrote,
                     path = %cache.path().display(),
-                    "could not write the library index"
-                ),
+                    "library index up to date"
+                );
+                report.cache_file = Some(cache.path().to_path_buf());
             }
+            Err(reason) => tracing::warn!(
+                reason = %reason,
+                path = %cache.path().display(),
+                "could not write the library index"
+            ),
         }
     }
 

@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 use music_tui::app::{AppState, Options, Phase};
-use music_tui::model::{sort_tracks, Track};
+use music_tui::model::{Track, sort_tracks};
 use music_tui::ui::render_lines;
 
 /// Build `n` tracks with realistic-looking tags.

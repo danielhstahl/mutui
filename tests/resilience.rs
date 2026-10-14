@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use music_tui::app::{reduce, AppState, Msg, Notice, Options, Phase, PlaybackState};
+use music_tui::app::{AppState, Msg, Notice, Options, Phase, PlaybackState, reduce};
 use music_tui::audio::PlayerEvent;
-use music_tui::model::{fixture_tracks, sort_tracks, Track};
+use music_tui::model::{Track, fixture_tracks, sort_tracks};
 use music_tui::scan::{ScanMessage, ScanPhase, ScanProgress, ScanReport};
 use music_tui::testing::FixtureSet;
 
@@ -228,10 +228,11 @@ fn folder_that_vanished_after_starting_reports_clearly() {
         })),
         500,
     );
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("could not be read")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("could not be read"))
+    );
 }
 
 #[test]
@@ -249,10 +250,11 @@ fn file_deleted_mid_play_is_skipped_and_the_run_continues() {
         1_500,
     );
     assert_eq!(app.playlist.cursor(), Some(4), "the run continues");
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("Skipping")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("Skipping"))
+    );
     // Then a rescan discovers the file is really gone.
     let mut tracks: Vec<Track> = app
         .playlist
@@ -278,10 +280,11 @@ fn file_deleted_mid_play_is_skipped_and_the_run_continues() {
         app.playlist.run().is_some(),
         "run recomputed after the rescan"
     );
-    assert!(app
-        .playlist
-        .cursor()
-        .is_some_and(|c| c < app.playlist.len()));
+    assert!(
+        app.playlist
+            .cursor()
+            .is_some_and(|c| c < app.playlist.len())
+    );
 }
 
 #[test]
@@ -472,10 +475,11 @@ fn unsupported_backend_control_surfaces_instead_of_stopping_playback() {
         1_100,
     );
     assert!(matches!(app.playback, PlaybackState::Playing { .. }));
-    assert!(app
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text.contains("seeking")));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("seeking"))
+    );
 }
 
 #[test]

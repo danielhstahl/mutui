@@ -10,13 +10,13 @@
 //! pass `--refresh` semantics by deleting the file) to measure cold again.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use music_tui::library_cache::{self, LibraryCache};
-use music_tui::model::{sort_tracks, Track};
+use music_tui::model::{Track, sort_tracks};
 use music_tui::scan::{self, ScanConfig, ScanMessage, ScanReport};
 
 /// Scan `root` with `cache`, returning the rows, the report and the wall time.

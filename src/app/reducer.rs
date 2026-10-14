@@ -11,9 +11,9 @@ use std::path::Path;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 
 use crate::audio::{PlayerCommand, PlayerEvent};
-use crate::model::{sort_tracks, RunEnded};
+use crate::model::{RunEnded, sort_tracks};
 use crate::scan::{ScanMessage, ScanReport};
-use crate::ui::mouse::{hit_test, HitContext, MouseAction};
+use crate::ui::mouse::{HitContext, MouseAction, hit_test};
 
 use super::state::{AppState, Notice, Phase, PlaybackState, ScanStatus};
 use crate::scan::ScanPhase;
@@ -122,11 +122,11 @@ fn quit(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn expire_notices(state: &mut AppState, now: u64) -> Vec<Effect> {
-    if let Some(notice) = &state.notice {
-        if !notice.is_live(now) {
-            state.notice = None;
-            state.dirty = true;
-        }
+    if let Some(notice) = &state.notice
+        && !notice.is_live(now)
+    {
+        state.notice = None;
+        state.dirty = true;
     }
     Vec::new()
 }
@@ -423,11 +423,12 @@ fn reduce_mouse(state: &mut AppState, event: MouseEvent, now: u64) -> Vec<Effect
 
 /// Click-to-play (and the `Enter` key): the start of a new artist run.
 fn play_row(state: &mut AppState, index: usize, now: u64) -> Vec<Effect> {
-    if let Some((last_index, last_now)) = state.last_play {
-        if last_index == index && now.saturating_sub(last_now) < DEBOUNCE_MS {
-            tracing::debug!(index, "ignoring duplicate click");
-            return Vec::new();
-        }
+    if let Some((last_index, last_now)) = state.last_play
+        && last_index == index
+        && now.saturating_sub(last_now) < DEBOUNCE_MS
+    {
+        tracing::debug!(index, "ignoring duplicate click");
+        return Vec::new();
     }
     state.last_play = Some((index, now));
     state.dragging = false;

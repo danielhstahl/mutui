@@ -11,15 +11,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyEvent, MouseEvent};
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use crate::audio::PlayerHandle;
 use crate::error::{Error, Result};
 use crate::scan::ScanMessage;
 use crate::ui::render;
 
-use super::reducer::{msg_from_event, reduce, Effect, Msg};
+use super::reducer::{Effect, Msg, msg_from_event, reduce};
 use super::state::AppState;
 use super::time::Clock;
 
@@ -209,11 +209,11 @@ pub fn run_loop(
 
     loop {
         iterations += 1;
-        if let Some(limit) = max_iterations {
-            if iterations > limit {
-                tracing::warn!("event loop hit its iteration limit; forcing quit");
-                break;
-            }
+        if let Some(limit) = max_iterations
+            && iterations > limit
+        {
+            tracing::warn!("event loop hit its iteration limit; forcing quit");
+            break;
         }
         let now = clock.now();
         let mut effects: Vec<Effect> = Vec::new();

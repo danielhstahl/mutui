@@ -1,12 +1,12 @@
 //! Top-level render: list pane + scrollbar + footer, plus the help overlay.
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 use crate::app::state::AppState;
 
