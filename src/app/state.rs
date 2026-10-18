@@ -246,6 +246,14 @@ pub struct AppState {
     pub notice: Option<Notice>,
     /// Artist of the run that just finished, if the last stop was end-of-artist.
     pub end_of_artist: Option<String>,
+    /// `true` while `playback` is `Paused` *and* the paused song's player has
+    /// ended underneath us (EOF, a decoder that died, a backend that refused to
+    /// pause).
+    ///
+    /// The run must not move on by itself while the user holds it paused, so the
+    /// end is remembered here and `Space` restarts *that* song instead of
+    /// whatever row the cursor sits on.
+    pub paused_track_ended: bool,
     /// `true` while a scrollbar drag is active.
     pub dragging: bool,
     /// `true` while the key-binding help overlay is open.
@@ -297,6 +305,7 @@ impl AppState {
             muted: false,
             notice: None,
             end_of_artist: None,
+            paused_track_ended: false,
             dragging: false,
             show_help: false,
             quit: false,
@@ -338,6 +347,7 @@ impl AppState {
         let track_id = self.next_track_id;
         self.next_track_id += 1;
         self.playback = PlaybackState::Playing { track_id, index };
+        self.paused_track_ended = false;
         self.position = Duration::ZERO;
         self.end_of_artist = None;
         self.notice = None;

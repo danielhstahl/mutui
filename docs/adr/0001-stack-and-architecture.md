@@ -120,6 +120,13 @@ is stamped on every play request. A `PlayerEvent` whose `track_id` is not the
 currently playing one is **dropped** — that is how the app survives a `Finished`
 that races a new click.
 
+A `Finished`/`Failed` for a track the user has **paused** does not advance the
+run either: a paused run is the user's, and only their input moves it. The
+reducer keeps the paused row, marks the song as ended (`AppState::paused_track_ended`)
+and says so in the footer, and the next `Space` replays that song — starting the
+next one instead is how "space does not unpause, it skips ahead" (`mutu-1sg`)
+looked.
+
 ## 5. Module layout
 
 ```

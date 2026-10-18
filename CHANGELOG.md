@@ -82,6 +82,33 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
   a generated library where every artist, album and year combination is
   scrambled. An album with no year at all sorts first inside its artist, and a
   library with no years sorts exactly as it did before.
+* **`Space` brings back the song you paused, minutes later or not** (`mutu-1sg`).
+  "After a few minutes, pressing space when paused doesn't unpause, it moves to
+  the next song." Three separate faults added up to that sentence. (1) The reducer
+  auto-advanced the run on a `Finished`/`Failed` for the *paused* track, so a
+  decoder that reached the end of the file a beat after the stop landed — or one
+  that died, or a backend that refuses to pause — silently started the next
+  song, and the next `Space` then landed on *that* song. A paused run now never
+  advances by itself: the row is held, the footer says
+  `<title> ended while paused — Space replays it`, and `Space` replays the song
+  that was paused instead of whatever row the cursor sits on. (2) In the
+  external-player backend, `set_volume` (and `seek`) are implemented by killing
+  the decoder and launching it again at the current position — and that respawn
+  cleared the path, so it reported `no track selected` and left the track dead,
+  and it also dropped `paused_at`, so a mute or volume press while paused left
+  the *screen* saying `Paused` over a decoder that was playing again: a few
+  minutes later that song really did end and the run walked on. Respawn keeps
+  the track and re-applies the `SIGSTOP` to the new child, so `+`/`-`/`m` can no
+  longer quietly unpause anything. Spawning the freshly-killed binary can also
+  briefly fail with `ETXTBSY` ("Text file busy"), which is now retried instead of
+  ending the track. (3) A background library sync (a minute apart) could shift
+  the paused song to a different row while `playback` kept the old index, so the
+  replay — and the playing marker — pointed at a neighbour; the swap-in now goes
+  through `AppState::rescan_set_library`, which re-anchors the row. Covered by
+  `tests/reducer_playback.rs`, two end-to-end runs in `tests/headless_loop.rs`
+  (five virtual minutes of ticking, and an event injected through the real audio
+  worker) and real-process tests in `src/audio/command_backend.rs` that read the
+  child's state out of `/proc`.
 
 ## [0.1.0]
 

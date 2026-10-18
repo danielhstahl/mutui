@@ -79,7 +79,7 @@ to keep the mouse entirely to the terminal.
 | --- | --- |
 | `q`, `Esc`, `Ctrl-C` | quit |
 | `Enter` | play the selected row |
-| `Space` | pause / resume |
+| `Space` | pause / resume (replays the paused song if its player ended while paused) |
 | `Up`/`Down`, `j`/`k` | move the selection |
 | `PageUp`/`PageDown` | scroll by one page |
 | `Home` / `End` | jump to the first / last song |
@@ -191,7 +191,9 @@ artist. Hidden directories and dot-files are skipped.
 
 The player runs on its own worker thread. End of track is detected by reaping
 the child process; pause/resume use `SIGSTOP`/`SIGCONT`, so pausing really stops
-the clock and no position events are emitted while paused.
+the clock and no position events are emitted while paused. Volume (and seek) are
+spawn-time switches for these players, so they are applied by relaunching the
+same file at the same position — which keeps a pause paused.
 
 ## Diagnostics
 
