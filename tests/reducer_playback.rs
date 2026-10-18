@@ -714,3 +714,202 @@ fn positions_only_apply_to_the_current_track() {
     reduce(&mut app, Msg::Tick, 1400);
     let _ = Playlist::default();
 }
+
+// --- the pause must survive however long it lasts (mutu-1sg) -----------------
+//
+// The report: "after a few minutes, pressing space when paused doesn't unpause,
+// but moves to the next song". Space is the only resume the app has, so it has
+// to bring back *the song that was paused* no matter what the player thread
+// decided to do in the meantime.
+
+/// Play row `index`, pause it, and return the paused track's id.
+fn play_and_pause(app: &mut AppState, index: usize, now: u64) -> u64 {
+    reduce(
+        app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 10, index),
+        now,
+    );
+    let effects = reduce(app, key(KeyCode::Char(' ')), now + 10);
+    assert_eq!(effects, vec![Effect::Command(PlayerCommand::Pause)]);
+    app.playback.track_id().expect("something is paused")
+}
+
+/// Many ticks, as if the user walked away: notice expiry and the periodic
+/// library sync both get a chance to run.
+fn let_minutes_pass(app: &mut AppState, from: u64, minutes: u64) {
+    let until = from + minutes * 60_000;
+    let mut now = from;
+    while now <= until {
+        reduce(app, Msg::Tick, now);
+        now += 50;
+    }
+}
+
+#[test]
+fn space_resumes_the_paused_song_after_minutes_of_pausing() {
+    let mut app = ready_state();
+    play_and_pause(&mut app, 3, 1_000);
+    let_minutes_pass(&mut app, 1_010, 5);
+
+    // Still paused on the same row: nothing advanced on its own.
+    assert!(matches!(app.playback, PlaybackState::Paused { .. }));
+    assert_eq!(app.playback.index(), Some(3));
+
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 310_000);
+    assert_eq!(
+        effects,
+        vec![Effect::Command(PlayerCommand::Resume)],
+        "space must resume, not start anything"
+    );
+    assert_eq!(
+        file_of(&effects),
+        "<nothing>",
+        "resuming must not play a file"
+    );
+    assert!(matches!(app.playback, PlaybackState::Playing { .. }));
+    assert_eq!(app.playlist.cursor(), Some(3));
+}
+
+#[test]
+fn a_paused_song_ending_does_not_move_to_the_next_song() {
+    let mut app = ready_state();
+    let track_id = play_and_pause(&mut app, 3, 1_000);
+    // The player process reaches the end of the paused file (or dies, or the
+    // pause never reached it) a few minutes later.
+    let effects = reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::Finished { track_id }),
+        200_000,
+    );
+    assert!(
+        effects.is_empty(),
+        "a paused run must not advance by itself: {effects:?}"
+    );
+    assert!(
+        matches!(app.playback, PlaybackState::Paused { .. }),
+        "the screen keeps saying Paused: {:?}",
+        app.playback
+    );
+    assert_eq!(app.playback.index(), Some(3));
+    assert_eq!(
+        app.playlist.cursor(),
+        Some(3),
+        "the cursor must not walk on past the paused row"
+    );
+    assert!(
+        app.paused_track_ended,
+        "the app must remember the paused song is over"
+    );
+}
+
+#[test]
+fn space_after_a_paused_song_ended_replays_that_song() {
+    let mut app = ready_state();
+    let track_id = play_and_pause(&mut app, 3, 1_000);
+    reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::Finished { track_id }),
+        200_000,
+    );
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 200_100);
+    assert_eq!(
+        file_of(&effects),
+        name(3),
+        "space replays the song that was paused, never the next one"
+    );
+    assert_eq!(app.playback.index(), Some(3));
+    assert!(matches!(app.playback, PlaybackState::Playing { .. }));
+    assert!(!app.paused_track_ended, "the flag is spent by the replay");
+}
+
+#[test]
+fn a_paused_song_that_fails_does_not_skip_ahead() {
+    let mut app = ready_state();
+    let track_id = play_and_pause(&mut app, 4, 1_000);
+    let effects = reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::Failed {
+            track_id,
+            reason: "the decoder died".to_string(),
+        }),
+        200_000,
+    );
+    assert!(
+        effects.is_empty(),
+        "a paused failure must not skip to the next row: {effects:?}"
+    );
+    assert_eq!(app.playlist.cursor(), Some(4));
+    assert_eq!(app.failures, 0, "auto-skip does not apply to a pause");
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("the decoder died")),
+        "the reason is still shown: {:?}",
+        app.notice
+    );
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 200_100);
+    assert_eq!(file_of(&effects), name(4), "space retries the same row");
+}
+
+/// The periodic background sync (a minute apart) can re-sort the library while
+/// a song is paused. The pause belongs to the *song*, not to the row number it
+/// happened to be on, otherwise `Space` replays whatever row the old number now
+/// points at — a different song.
+#[test]
+fn a_background_sync_that_moves_the_paused_row_keeps_the_pause_on_the_same_song() {
+    let mut app = ready_state();
+    // A finished first scan is what makes later scans stage and swap in.
+    app.library_digest = Some(1);
+    let track_id = play_and_pause(&mut app, 3, 1_000);
+    let paused = app.playlist.get(3).cloned().expect("the paused row");
+    reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::Finished { track_id }),
+        200_000,
+    );
+    assert!(app.paused_track_ended);
+
+    // The sync finds one more song by the same artist, and it sorts *before*
+    // the paused one, so the paused song shifts down a row.
+    let mut earlier = paused.clone();
+    earlier.path = "/spec/ab-album0-d1t1.mp3".into();
+    earlier.title = "Earlier song".to_string();
+    earlier.album = Some("Album 0".to_string());
+    earlier.refresh_key();
+    let mut rescanned = fixture_tracks();
+    rescanned.push(earlier);
+    sort_tracks(&mut rescanned);
+    let moved = rescanned
+        .iter()
+        .position(|t| t.path == paused.path)
+        .expect("the paused song survives the sync");
+    assert!(moved > 3, "the new song sorts in front: {moved}");
+
+    reduce(&mut app, Msg::Rescan, 205_000);
+    for track in rescanned {
+        reduce(&mut app, Msg::Scan(ScanMessage::Track(track)), 206_000);
+    }
+    reduce(
+        &mut app,
+        Msg::Scan(ScanMessage::Done(ScanReport {
+            scanned: 23,
+            succeeded: 23,
+            digest: 2,
+            ..ScanReport::default()
+        })),
+        207_000,
+    );
+    assert_eq!(app.playlist.cursor(), Some(moved));
+    assert_eq!(
+        app.playback.index(),
+        Some(moved),
+        "the paused row follows its song"
+    );
+
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 210_000);
+    assert_eq!(
+        file_of(&effects),
+        name(3),
+        "space replays the song that was paused, not the row its number now points at"
+    );
+}

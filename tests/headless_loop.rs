@@ -499,3 +499,190 @@ fn periodic_syncs_and_shift_r_reach_the_scan_job_through_the_loop() {
         app.last_scan_ms
     );
 }
+
+// --- a pause that lasts (mutu-1sg) ------------------------------------------
+
+/// The report, end to end: pause a song, let five minutes of ticks go by, press
+/// space. The paused song comes back and nothing else was ever played.
+#[test]
+fn a_five_minute_pause_is_resumed_by_space() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tracks = library(dir.path());
+    let (backend, mock) = MockBackend::paired();
+    let player = PlayerHandle::spawn(Box::new(backend));
+    let mut app = state_with(tracks, "mock");
+    // 6000 ticks at the loop's 50 ms tick is five minutes of virtual time; the
+    // fake clock moves them instantly so the test does not sleep.
+    let script: Vec<Input> = [resize(60, 14), click(1), key(KeyCode::Char(' '))]
+        .into_iter()
+        .chain(std::iter::repeat_n(Input::Tick, 6000))
+        .chain([key(KeyCode::Char(' '))])
+        .collect();
+    let stop_after = script.len();
+    let mut input = ScriptedInput::new(script);
+    let mut drawer = drawer60();
+    run(
+        &mut app,
+        &player,
+        &mut input,
+        &mut drawer,
+        &FakeClock::new(0),
+        Some(stop_after),
+    )
+    .expect("loop");
+    player.shutdown();
+    assert!(
+        app.now >= 300_000,
+        "the clock really did run for minutes: {}",
+        app.now
+    );
+    assert_eq!(
+        mock.plays(),
+        vec![1],
+        "only the clicked song was ever played"
+    );
+    assert!(
+        matches!(app.playback, PlaybackState::Playing { .. }),
+        "space resumed the pause: {:?}",
+        app.playback
+    );
+    assert_eq!(app.playlist.cursor(), Some(1));
+}
+
+/// Where [`EndingInput`] is in the little script the pause test replays.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Resize,
+    Click,
+    Settle,
+    Pause,
+    Inject,
+    /// Wait until the audio worker has really forwarded the injected event.
+    WaitForWorker,
+    /// Two more rounds so the loop drains it before the next key.
+    Drain,
+    Space,
+    Settle2,
+    /// Just ticks; the test stops the loop with an iteration limit so the
+    /// resumed state is still visible when it returns.
+    Idle,
+}
+
+/// Scripted input for the pause test: pause the clicked row, have the player
+/// report that the paused song ended, and press space again — waiting for the
+/// worker thread to actually deliver the event instead of guessing a sleep
+/// length, so the test is deterministic even on a loaded machine.
+struct EndingInput {
+    mock: MockHandle,
+    step: Step,
+    rounds: usize,
+}
+
+impl EndingInput {
+    fn new(mock: MockHandle) -> Self {
+        Self {
+            mock,
+            step: Step::Resize,
+            rounds: 0,
+        }
+    }
+}
+
+impl InputSource for EndingInput {
+    fn poll(&mut self, _timeout: Duration) -> Input {
+        match self.step {
+            Step::Resize => {
+                self.step = Step::Click;
+                resize(60, 14)
+            }
+            Step::Click => {
+                self.step = Step::Settle;
+                click(0)
+            }
+            Step::Settle => {
+                std::thread::sleep(Duration::from_millis(60));
+                self.step = Step::Pause;
+                Input::Tick
+            }
+            Step::Pause => {
+                self.step = Step::Inject;
+                key(KeyCode::Char(' '))
+            }
+            Step::Inject => {
+                // A few minutes later the paused song's decoder reports that it
+                // reached the end of the file.
+                self.mock.push(PlayerEvent::Finished { track_id: 1 });
+                self.step = Step::WaitForWorker;
+                Input::Tick
+            }
+            Step::WaitForWorker => {
+                if self.mock.has_scripted_events() {
+                    std::thread::sleep(Duration::from_millis(10));
+                    return Input::Tick;
+                }
+                self.step = Step::Drain;
+                Input::Tick
+            }
+            Step::Drain => {
+                self.rounds += 1;
+                if self.rounds < 2 {
+                    return Input::Tick;
+                }
+                self.step = Step::Space;
+                Input::Tick
+            }
+            Step::Space => {
+                self.step = Step::Settle2;
+                key(KeyCode::Char(' '))
+            }
+            Step::Settle2 => {
+                std::thread::sleep(Duration::from_millis(60));
+                self.step = Step::Idle;
+                Input::Tick
+            }
+            Step::Idle => Input::Tick,
+        }
+    }
+}
+
+/// And when the player ends the paused song on its own — EOF reached a beat
+/// after the stop landed, a decoder that died, a backend that refuses to pause —
+/// the run still must not walk on: that is what made `Space` look like "skip to
+/// the next song".
+#[test]
+fn a_paused_song_ending_in_the_worker_does_not_advance_the_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tracks = library(dir.path());
+    let (backend, mock) = MockBackend::paired();
+    let player = PlayerHandle::spawn(Box::new(backend));
+    let mut app = state_with(tracks, "mock");
+    let mut input = EndingInput::new(mock.clone());
+    let mut drawer = drawer60();
+    run(
+        &mut app,
+        &player,
+        &mut input,
+        &mut drawer,
+        &SystemClock,
+        // Enough rounds to reach the space key, then stop without quitting so
+        // the resumed state survives to be asserted.
+        Some(80),
+    )
+    .expect("loop");
+    player.shutdown();
+    assert!(
+        !mock.has_scripted_events(),
+        "the injected event was delivered"
+    );
+    assert_eq!(
+        app.playlist.cursor(),
+        Some(0),
+        "the paused row must not be replaced by the next one"
+    );
+    assert_eq!(
+        mock.plays(),
+        vec![1, 2],
+        "space replayed the paused song instead of advancing"
+    );
+    assert_eq!(app.playback.index(), Some(0));
+}

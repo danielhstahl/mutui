@@ -281,6 +281,12 @@ impl CommandBackend {
         }
     }
 
+    /// Reap the decoder process and freeze the position clock.
+    ///
+    /// `path` is deliberately *not* cleared: `seek` and `set_volume` are
+    /// implemented by relaunching the same file (see [`Self::respawn`]), and
+    /// forgetting the path here made those commands kill the track instead of
+    /// restarting it. `stop` clears it explicitly.
     fn kill_child(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _kill = child.kill();
@@ -289,7 +295,24 @@ impl CommandBackend {
         self.anchor = None;
         self.paused_at = None;
         self.paused_total = Duration::ZERO;
-        self.path = None;
+    }
+
+    /// Relaunch the current track at `start`.
+    ///
+    /// Players whose volume and start position are spawn-time switches (mpv,
+    /// ffplay, mplayer) have to be restarted for `seek`/`set_volume` to take
+    /// effect. A pause is re-applied to the fresh child: the screen still says
+    /// `Paused`, and a respawn that left the decoder running would resume the
+    /// song behind the user's back — after which the run advances on its own a
+    /// few minutes later and `Space` no longer does what it says (mutu-1sg).
+    fn respawn(&mut self, start: Duration) -> Result<(), String> {
+        let was_paused = self.paused_at.take().is_some();
+        self.kill_child();
+        self.spawn_at(Some(start))?;
+        if was_paused {
+            self.pause()?;
+        }
+        Ok(())
     }
 
     fn spawn_at(&mut self, start: Option<Duration>) -> Result<(), String> {
@@ -304,7 +327,7 @@ impl CommandBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        match command.spawn() {
+        match spawn_child(&mut command) {
             Ok(child) => {
                 self.child = Some(child);
                 self.anchor = Some(Instant::now());
@@ -330,6 +353,10 @@ impl Backend for CommandBackend {
         // previous one first.
         self.kill_child();
         self.pending.clear();
+        // A play that cannot start must not leave the previous track's path
+        // behind for `seek`/`set_volume` to resurrect.
+        self.path = None;
+        self.last_position = Duration::ZERO;
         if !req.path.is_file() {
             return Err(format!("file is gone: {}", req.path.display()));
         }
@@ -352,17 +379,25 @@ impl Backend for CommandBackend {
     }
 
     fn resume(&mut self) -> Result<(), String> {
-        let Some(paused_at) = self.paused_at.take() else {
+        let Some(paused_at) = self.paused_at else {
             return Err("playback is not paused".to_string());
         };
+        if self.child.is_none() {
+            // The decoder went away while paused; there is nothing to wake up.
+            return Err("the paused song has already ended".to_string());
+        }
+        self.signal(libc_cont())?;
+        self.paused_at = None;
         self.paused_total += paused_at.elapsed();
-        self.signal(libc_cont())
+        Ok(())
     }
 
     fn stop(&mut self) {
         self.kill_child();
         self.pending.clear();
         self.track_id = 0;
+        self.path = None;
+        self.last_position = Duration::ZERO;
     }
 
     fn seek(&mut self, to: Duration) -> Result<(), String> {
@@ -373,8 +408,7 @@ impl Backend for CommandBackend {
             return Err("nothing is playing".to_string());
         }
         self.pending.clear();
-        self.kill_child();
-        self.spawn_at(Some(to))
+        self.respawn(to)
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), String> {
@@ -393,8 +427,7 @@ impl Backend for CommandBackend {
         }
         let position = self.elapsed();
         self.pending.clear();
-        self.kill_child();
-        self.spawn_at(Some(position))
+        self.respawn(position)
     }
 
     fn poll(&mut self) -> Vec<PlayerEvent> {
@@ -444,6 +477,39 @@ impl Drop for CommandBackend {
     }
 }
 
+/// Spawn, retrying the momentary `ETXTBSY` ("Text file busy") that `execve`
+/// can return while the kernel is still releasing the binary image of the
+/// process that was just killed.
+///
+/// `seek` and `set_volume` are implemented by killing the decoder and launching
+/// the same program again, so without this a volume key can fail with a
+/// "player could not be started" message and leave the track silent.
+#[cfg(unix)]
+fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
+    /// Attempts before giving up; ~100 ms in total, on the audio worker thread.
+    const ATTEMPTS: u32 = 20;
+    /// How long to wait between attempts.
+    const WAIT: Duration = Duration::from_millis(5);
+    let mut last: Option<std::io::Error> = None;
+    for _ in 0..ATTEMPTS {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(WAIT);
+                last = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(std::io::Error::last_os_error))
+}
+
+/// Spawn, retrying the momentary `ETXTBSY` see [`spawn_child`] (no-op elsewhere).
+#[cfg(not(unix))]
+fn spawn_child(command: &mut Command) -> std::io::Result<Child> {
+    command.spawn()
+}
+
 fn libc_stop() -> i32 {
     #[cfg(unix)]
     {
@@ -469,6 +535,127 @@ fn libc_cont() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decoder stand-in: a real external process that runs for a long time,
+    /// ignores the argv the backend builds, and can be inspected from the test.
+    /// It exists so the pause/volume/seek behaviour of the *process* can be
+    /// asserted, which is what the pause bug in `mutu-1sg` is about.
+    #[cfg(unix)]
+    struct FakePlayer {
+        spec: PlayerSpec,
+        track: PathBuf,
+        dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakePlayer {
+        fn new(name: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("mutu-cmd-backend-{name}"));
+            let _remove = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let script = dir.join("fakedecoder");
+            // `exec` so that the child *is* `sleep`: reaping it leaves nothing
+            // behind, and a stopped `sleep` really is a stopped process.
+            std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").expect("script");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let track = dir.join("song.mp3");
+            std::fs::write(&track, b"the decoder never reads this").expect("fixture");
+            // Same switches as mpv: volume and start position are spawn-time
+            // arguments, so both are implemented by relaunching the child.
+            let mpv = KNOWN_PLAYERS[0].clone();
+            let bin = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+            Self {
+                spec: PlayerSpec {
+                    bin,
+                    label: "fakedecoder",
+                    volume: mpv.volume,
+                    seek: mpv.seek,
+                },
+                track,
+                dir,
+            }
+        }
+
+        fn backend(&self) -> CommandBackend {
+            CommandBackend::new(self.spec.clone())
+        }
+
+        fn req(&self, track_id: u64) -> PlayRequest {
+            PlayRequest {
+                path: self.track.clone(),
+                track_id,
+                duration: Some(Duration::from_secs(300)),
+            }
+        }
+
+        fn cleanup(&self) {
+            let _remove = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The child's process-state letter (`T` = stopped by a signal), when this
+    /// system exposes it.
+    #[cfg(unix)]
+    fn child_state(backend: &CommandBackend) -> Option<char> {
+        let pid = backend.child.as_ref()?.id();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The comm field is parenthesised and may itself contain spaces, so
+        // everything after the last `)` is what we want.
+        let after_comm = stat.rfind(')')? + 1;
+        stat[after_comm..].split_whitespace().next()?.chars().next()
+    }
+
+    /// Wait for the child's process state to become `want`. Delivering a signal
+    /// and the kernel updating `/proc` are not synchronous, so a test must poll
+    /// for the state it caused rather than reading it once.
+    #[cfg(unix)]
+    fn child_state_is(backend: &CommandBackend, want: char) -> bool {
+        for _ in 0..200 {
+            if child_state(backend) == Some(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// `true` once the child is no longer stopped by a signal.
+    #[cfg(unix)]
+    fn child_is_running(backend: &CommandBackend) -> bool {
+        for _ in 0..200 {
+            if child_state(backend) != Some('T') {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// Collect everything the backend reports while it runs for `ms`.
+    #[cfg(unix)]
+    fn pump(backend: &mut CommandBackend, ms: u64) -> Vec<PlayerEvent> {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        let mut out = Vec::new();
+        while Instant::now() < deadline {
+            out.extend(backend.poll());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        out.extend(backend.poll());
+        out
+    }
+
+    #[cfg(unix)]
+    fn positions(events: &[PlayerEvent]) -> Vec<Duration> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayerEvent::Position { position, .. } => Some(*position),
+                _ => None,
+            })
+            .collect()
+    }
 
     #[test]
     fn argv_carries_volume_and_start() {
@@ -525,5 +712,139 @@ mod tests {
         });
         let _remove = std::fs::remove_file(&path);
         assert!(result.is_err(), "spawn of a missing binary must fail");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pause_stops_the_child_and_resume_wakes_it() {
+        let player = FakePlayer::new("pause-resume");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        assert!(child_is_running(&be), "the child starts out running");
+        be.pause().expect("pause");
+        assert!(
+            child_state_is(&be, 'T'),
+            "SIGSTOP must stop the child (state {:?})",
+            child_state(&be)
+        );
+        assert!(
+            pump(&mut be, 150).iter().all(|e| !matches!(
+                e,
+                PlayerEvent::Position { .. } | PlayerEvent::Finished { .. }
+            )),
+            "a stopped track emits nothing"
+        );
+        be.resume().expect("resume");
+        assert!(
+            child_is_running(&be),
+            "SIGCONT must wake the child (state {:?})",
+            child_state(&be)
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_change_while_playing_relaunches_instead_of_killing() {
+        let player = FakePlayer::new("volume-playing");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        std::thread::sleep(Duration::from_millis(150));
+        be.set_volume(0.5)
+            .expect("a respawn-style player must accept volume while playing");
+        let events = pump(&mut be, 500);
+        assert!(
+            be.child.is_some(),
+            "the decoder must still be running after a volume change"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Failed { .. } | PlayerEvent::Finished { .. })),
+            "changing the volume must not end the track: {events:?}"
+        );
+        assert!(
+            positions(&events)
+                .last()
+                .is_some_and(|p| *p >= Duration::from_millis(300)),
+            "the position clock must keep ticking: {:?}",
+            positions(&events)
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn volume_change_while_paused_keeps_the_track_paused() {
+        let player = FakePlayer::new("volume-paused");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        std::thread::sleep(Duration::from_millis(120));
+        be.pause().expect("pause");
+        be.set_volume(0.4).expect("volume while paused");
+        assert!(
+            child_state_is(&be, 'T'),
+            "restarting the decoder for a volume change may not quietly unpause it (state {:?})",
+            child_state(&be)
+        );
+        assert!(
+            pump(&mut be, 200)
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Position { .. })),
+            "a paused track must not report positions after a volume change"
+        );
+        be.resume()
+            .expect("the pause survives the volume change, so resume works");
+        assert!(
+            pump(&mut be, 300)
+                .iter()
+                .any(|e| matches!(e, PlayerEvent::Position { .. })),
+            "and the track really does resume"
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seeking_while_paused_stays_paused_at_the_new_position() {
+        let player = FakePlayer::new("seek-paused");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        be.pause().expect("pause");
+        be.seek(Duration::from_secs(40)).expect("seek while paused");
+        assert!(
+            child_state_is(&be, 'T'),
+            "still paused (state {:?})",
+            child_state(&be)
+        );
+        assert!(
+            be.elapsed() >= Duration::from_secs(40),
+            "the position moved to the seek target"
+        );
+        be.resume().expect("resume after the seek");
+        assert!(
+            positions(&pump(&mut be, 300))
+                .last()
+                .is_some_and(|p| *p >= Duration::from_secs(40)),
+            "playback continues from the sought position"
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_forgets_the_track_so_volume_cannot_resurrect_it() {
+        let player = FakePlayer::new("stop-then-volume");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        be.stop();
+        be.set_volume(0.2)
+            .expect("volume applies to the next track");
+        assert!(be.child.is_none(), "nothing may be running after a stop");
+        player.cleanup();
     }
 }

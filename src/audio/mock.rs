@@ -68,6 +68,17 @@ impl MockHandle {
             .unwrap_or_default()
     }
 
+    /// `true` while scripted events are still waiting to be picked up by the
+    /// worker. Tests use it as a barrier so they do not have to guess how long
+    /// a worker thread needs.
+    #[must_use]
+    pub fn has_scripted_events(&self) -> bool {
+        self.scripted
+            .lock()
+            .map(|queue| !queue.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Queue an event to be emitted on the next poll.
     pub fn push(&self, event: PlayerEvent) {
         if let Ok(mut queue) = self.scripted.lock() {
