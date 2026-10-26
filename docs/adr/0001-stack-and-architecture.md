@@ -127,6 +127,15 @@ and says so in the footer, and the next `Space` replays that song — starting t
 next one instead is how "space does not unpause, it skips ahead" (`mutu-1sg`)
 looked.
 
+Which row that is, is a fact about the library, not about playback: `AppState`
+remembers the current song by **path** (`AppState::playback_path`) and every
+library replacement — the first scan sorting what it streamed, a background sync,
+`r` — re-derives the row index from it (`AppState::reconcile_playback_row`). A
+song that is no longer in the library owns no row: nothing is marked for it, and
+`Space` refuses to start the neighbour its old row number now names, which is the
+other half of "pause, a refresh happens, unpause skips to the next song"
+(`mutu-nb3`).
+
 ## 5. Module layout
 
 ```

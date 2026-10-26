@@ -79,7 +79,7 @@ to keep the mouse entirely to the terminal.
 | --- | --- |
 | `q`, `Esc`, `Ctrl-C` | quit |
 | `Enter` | play the selected row |
-| `Space` | pause / resume (replays the paused song if its player ended while paused) |
+| `Space` | pause / resume (replays the paused song if its player ended while paused, and finds it again if the library refreshed in between) |
 | `Up`/`Down`, `j`/`k` | move the selection |
 | `PageUp`/`PageDown` | scroll by one page |
 | `Home` / `End` | jump to the first / last song |

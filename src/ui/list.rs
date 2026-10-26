@@ -184,13 +184,13 @@ pub fn visible_window(scroll: &Scroll, len: usize) -> (usize, usize) {
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let width = usize::from(area.width);
     let (start, end) = visible_window(&state.scroll, state.playlist.len());
-    let playing = match state.playback {
-        PlaybackState::Playing { index, .. } => Some(index),
-        _ => None,
-    };
-    let paused = match state.playback {
-        PlaybackState::Paused { index, .. } => Some(index),
-        _ => None,
+    // Marked by path, not by the index in the state machine: after a refresh
+    // that removed the song there is no row to mark, and painting the row its
+    // old number now names would claim a neighbour is playing.
+    let (playing, paused) = match (state.playback_row(), state.playback) {
+        (Some(row), PlaybackState::Playing { .. }) => (Some(row), None),
+        (Some(row), PlaybackState::Paused { .. }) => (None, Some(row)),
+        _ => (None, None),
     };
     let cursor = state.playlist.cursor();
     let ascii = state.opts.ascii;

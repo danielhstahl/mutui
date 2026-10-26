@@ -169,6 +169,9 @@ mod tests {
             track_id: 1,
             index: 0,
         };
+        // The marker follows the song, so a hand-built playing state names the
+        // song as well as the row.
+        app.playback_path = app.playlist.get(0).map(|track| track.path.clone());
         app
     }
 

@@ -109,6 +109,24 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
   (five virtual minutes of ticking, and an event injected through the real audio
   worker) and real-process tests in `src/audio/command_backend.rs` that read the
   child's state out of `/proc`.
+* **A refresh between pause and unpause no longer skips to the next song**
+  (`mutu-nb3`). The same sentence as `mutu-1sg`, one layer down: `playback`
+  remembered the paused song as a *row index*, and a refresh moves rows. Two ways
+  in: the first scan sorts every row it streamed, so a song clicked out of the
+  half-filled list sat somewhere else entirely once the scan finished
+  (`Playlist::finish_scan` re-anchored the cursor and left `playback` on the
+  number it had), and a sync re-anchored `playback` from the *cursor* — so a
+  paused song the user had browsed away from lost its row too. `Space`, which
+  replays the paused row when that row's player already ended, then started
+  whichever neighbour the old number now named. The state machine owns a song, not
+  a row: `request_play` records `AppState::playback_path`, and every library
+  replacement (`finish_first_scan`, `rescan_set_library`) re-derives the row from
+  it in `reconcile_playback_row`. The `▶`/`▮` marker, the scroll-follow and the
+  replay all resolve that path, so a song the sync *deleted* marks no row at all
+  and `Space` answers `<title> is no longer in the library — nothing to resume`
+  rather than starting a stranger. Covered by `tests/pause_across_refresh.rs`,
+  including two end-to-end runs that replay a whole scan into the real event loop
+  between the pause and the unpause.
 
 ## [0.1.0]
 

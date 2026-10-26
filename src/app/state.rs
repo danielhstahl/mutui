@@ -236,6 +236,17 @@ pub struct AppState {
     pub scan: ScanStatus,
     /// Playback state machine.
     pub playback: PlaybackState,
+    /// Path of the song `playback` owns, independent of the row it sits on.
+    ///
+    /// `PlaybackState` carries a row index because the UI needs one, but a row
+    /// index is a fact about the *library*, and a refresh moves rows: the first
+    /// scan sorts every row it streamed, and a sync can insert or delete one.
+    /// The path is what identifies the song, so every library replacement
+    /// re-derives the index from it
+    /// ([`AppState::reconcile_playback_row`]). Keeping only the index is what
+    /// made an unpause start the neighbour of the song that was paused
+    /// (`mutu-nb3`).
+    pub playback_path: Option<PathBuf>,
     /// Last reported playback position.
     pub position: Duration,
     /// Volume `0.0..=1.0`.
@@ -246,9 +257,10 @@ pub struct AppState {
     pub notice: Option<Notice>,
     /// Artist of the run that just finished, if the last stop was end-of-artist.
     pub end_of_artist: Option<String>,
-    /// `true` while `playback` is `Paused` *and* the paused song's player has
-    /// ended underneath us (EOF, a decoder that died, a backend that refused to
-    /// pause).
+    /// `true` while `playback` is `Paused` *and* the paused song can no longer be
+    /// woken up: its player ended underneath us (EOF, a decoder that died, a
+    /// backend that refused to pause), or the refresh that came in between
+    /// removed the file.
     ///
     /// The run must not move on by itself while the user holds it paused, so the
     /// end is remembered here and `Space` restarts *that* song instead of
@@ -300,6 +312,7 @@ impl AppState {
                 ..ScanStatus::default()
             },
             playback: PlaybackState::Idle,
+            playback_path: None,
             position: Duration::ZERO,
             volume: 1.0,
             muted: false,
@@ -353,11 +366,106 @@ impl AppState {
         self.notice = None;
         self.scroll.ensure_visible(index);
         let track = self.playlist.get(index)?;
+        self.playback_path = Some(track.path.clone());
         Some(PlayerCommand::Play(crate::audio::PlayRequest {
             path: track.path.clone(),
             track_id,
             duration: track.duration,
         }))
+    }
+
+    /// Row that the song `playback` owns occupies *right now*, or `None` when
+    /// that song is not in the library (any more).
+    ///
+    /// Anything that points at the current song — the `▶`/`▮` marker, the
+    /// scroll-follow, `Space` after a pause — goes through this rather than
+    /// through `playback.index()`, so a refresh that moved or removed the song
+    /// cannot aim it at a neighbour.
+    #[must_use]
+    pub fn playback_row(&self) -> Option<usize> {
+        if !self.playback.is_active() {
+            return None;
+        }
+        match self.playback_path.as_ref() {
+            Some(path) => self
+                .playlist
+                .index_of_path(path)
+                .filter(|index| *index < self.playlist.len()),
+            // A state built without going through `request_play` (a test, a
+            // restored session) only has the row number to go on.
+            None => self
+                .playback
+                .index()
+                .filter(|index| *index < self.playlist.len()),
+        }
+    }
+
+    /// Display title of the song `playback` owns, for a footer message.
+    #[must_use]
+    pub fn playback_title(&self) -> Option<String> {
+        let path = self.playback_path.as_ref()?;
+        if let Some(track) = self
+            .playlist
+            .tracks()
+            .iter()
+            .find(|track| &track.path == path)
+        {
+            return Some(track.title.clone());
+        }
+        // The song left the library: fall back to the file name it had.
+        Some(
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Song".to_string()),
+        )
+    }
+
+    /// Re-derive the row `playback` points at from [`AppState::playback_path`].
+    ///
+    /// Must run after every library replacement. When the song is gone the row
+    /// it used to have is *not* clamped to a neighbour: the state machine keeps
+    /// owning the song it owned, says so, and `Space` refuses to play a stranger
+    /// (`mutu-nb3`).
+    pub fn reconcile_playback_row(&mut self) {
+        if !self.playback.is_active() {
+            self.playback_path = None;
+            return;
+        }
+        let resolved = self
+            .playback_path
+            .as_ref()
+            .and_then(|path| self.playlist.index_of_path(path));
+        if let Some(index) = resolved {
+            self.playback = match self.playback {
+                PlaybackState::Playing { track_id, .. } => {
+                    PlaybackState::Playing { track_id, index }
+                }
+                PlaybackState::Paused { track_id, .. } => PlaybackState::Paused { track_id, index },
+                other => other,
+            };
+            self.scroll.ensure_visible(index);
+            return;
+        }
+        if matches!(self.playback, PlaybackState::Paused { .. }) {
+            // A paused song whose file left the library can never be resumed,
+            // which is the same problem for `Space` as one whose player ended:
+            // there is nothing to wake, only a row number left behind.
+            self.paused_track_ended = true;
+        }
+    }
+
+    /// The first scan ended: sort the rows it streamed in and re-anchor both the
+    /// cursor and the song `playback` owns.
+    ///
+    /// Sorting is a refresh in the harshest form — every row in the list moves —
+    /// so a paused song clicked out of the half-sorted list must be found by
+    /// path afterwards.
+    pub fn finish_first_scan(&mut self, anchor: Option<&crate::model::Track>) {
+        self.playlist.finish_scan(anchor);
+        self.scroll.set_content(self.playlist.len());
+        self.playlist.clamp_cursor();
+        self.reconcile_playback_row();
+        self.dirty = true;
     }
 
     /// Replace the library and keep the scroll geometry in sync.
@@ -383,17 +491,10 @@ impl AppState {
         self.playlist.replace(tracks, anchor);
         self.scroll.set_content(self.playlist.len());
         self.playlist.clamp_cursor();
-        if let Some(index) = self.playlist.cursor() {
-            // The row may have moved: keep the state machine in agreement.
-            self.playback = match self.playback {
-                PlaybackState::Playing { track_id, .. } => {
-                    PlaybackState::Playing { track_id, index }
-                }
-                PlaybackState::Paused { track_id, .. } => PlaybackState::Paused { track_id, index },
-                other => other,
-            };
-            self.scroll.ensure_visible(index);
-        }
+        // The paused/playing song may have moved anywhere in the new order (and
+        // the cursor is not it when the user has been browsing): re-anchor it by
+        // path, not from the cursor.
+        self.reconcile_playback_row();
         self.dirty = true;
     }
 
@@ -401,7 +502,7 @@ impl AppState {
     pub fn set_size(&mut self, width: u16, height: u16) {
         self.areas = areas(ratatui::layout::Rect::new(0, 0, width, height));
         self.scroll.set_visible(usize::from(self.areas.list.height));
-        if let Some(index) = self.playback.index().or(self.cursor()) {
+        if let Some(index) = self.playback_row().or(self.cursor()) {
             self.scroll.ensure_visible(index);
         }
         self.scroll.clamp();
