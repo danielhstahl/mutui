@@ -348,6 +348,20 @@ fn reduce_player(state: &mut AppState, event: PlayerEvent, now: u64) -> Vec<Effe
             state.notice = Some(Notice::warn(format!("Skipping {title}: {reason}"), now));
             return effects;
         }
+        PlayerEvent::EndedWhilePaused { track_id, reason } => {
+            if state.playback.track_id() != Some(track_id) {
+                return Vec::new();
+            }
+            if state.playback.is_playing() {
+                // The end was only visible because `Space` woke the decoder, so
+                // the state goes back to the pause that was really still held.
+                let index = state.playback.index().unwrap_or(0);
+                state.playback = PlaybackState::Paused { track_id, index };
+                state.paused_track_ended = true;
+                return restart_song_the_pause_outlived(state, reason, now);
+            }
+            return hold_paused_song(state, now, Some(reason));
+        }
         PlayerEvent::Notice(text) => {
             state.notice = Some(Notice::warn(text, now));
         }
@@ -374,6 +388,29 @@ fn hold_paused_song(state: &mut AppState, now: u64, reason: Option<String>) -> V
         now,
     ));
     Vec::new()
+}
+
+/// The user's `Space` woke a decoder that had already died behind the pause.
+///
+/// The press asked for *that* song, so it gets that song: the row is replayed by
+/// path, exactly like a paused song that ended quietly. Advancing instead — which
+/// is what a `Finished` here does — is the reported "pause, walk away, press
+/// space, it skipped to the next song".
+fn restart_song_the_pause_outlived(state: &mut AppState, reason: String, now: u64) -> Vec<Effect> {
+    let title = state.playback_title().unwrap_or_else(|| "Song".to_string());
+    tracing::debug!(
+        title,
+        reason,
+        "paused song was already over when it was woken; replaying it"
+    );
+    let effects = replay_paused_song(state, now);
+    if state.playback.is_playing() {
+        state.notice = Some(Notice::warn(
+            format!("{title} ended while paused ({reason}) — starting it again"),
+            now,
+        ));
+    }
+    effects
 }
 
 /// Auto-advance inside the artist run, or stop at its end.

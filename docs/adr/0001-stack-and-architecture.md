@@ -55,6 +55,12 @@ Child processes always get `stdin`/`stdout`/`stderr` from `/dev/null`, and the
 backend kills its child on `Drop`, so the terminal can never be corrupted by a
 player and no player outlives us.
 
+`SIGSTOP` stops a process, **not** the clock that process measures itself
+against, and a stopped process cannot exit. A player paused for minutes can
+therefore already be finished (or gone) by the time `SIGCONT` wakes it, and the
+end is only visible then — see §4 for the event the backend must report in that
+case.
+
 A `rodio` backend remains a drop-in addition: implement `audio::Backend`
 (`play/pause/resume/stop/seek/set_volume/poll`) and add it to
 `run::make_backend`; no other module changes.
@@ -105,6 +111,7 @@ pub enum PlayerEvent {
     Position { track_id: u64, position: Duration },   // <= ~4/s
     Finished { track_id: u64 },                       // track ended by itself
     Failed   { track_id: u64, reason: String },       // could not play
+    EndedWhilePaused { track_id: u64, reason: String },// a paused track was already over
     Notice(String),                                   // control refused (volume/seek)
 }
 
@@ -126,6 +133,18 @@ reducer keeps the paused row, marks the song as ended (`AppState::paused_track_e
 and says so in the footer, and the next `Space` replays that song — starting the
 next one instead is how "space does not unpause, it skips ahead" (`mutu-1sg`)
 looked.
+
+The hard part is that the app cannot always *know* about that end while the
+screen still says `Paused`: **a stopped process cannot exit**, so a decoder that
+ran out of song (or whose audio session was dropped) behind a `SIGSTOP` is only
+reapable once `SIGCONT` wakes it — and by then `Space` has already put the state
+back to `Playing`. Reporting such an end as `Finished` is what kept the symptom
+alive after the two fixes above: the run walked on in the same instant the user
+asked for the paused song. A backend therefore reports it as
+`EndedWhilePaused`, which means "this track was over before the user heard any
+of it again": if the state is already `Playing` (the `Space` that woke it) the
+reducer puts the state back to `Paused`, spends the flag, and replays *that*
+song; if it is still `Paused` it behaves exactly like a quiet `Finished`.
 
 Which row that is, is a fact about the library, not about playback: `AppState`
 remembers the current song by **path** (`AppState::playback_path`) and every

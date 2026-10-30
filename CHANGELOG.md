@@ -51,6 +51,27 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
 ### Fixed
 
+* **`Space` after a long pause brings back the paused song instead of the next
+  one** (`mutu-1sg`, `mutu-nb3`, and the report that outlived both of them).
+  `SIGSTOP` stops a player process but not the clock it measures itself against,
+  and a stopped process cannot exit — so a song paused for minutes can already be
+  over (or its decoder killed by the audio server for idling) and the app can only
+  reap it once `SIGCONT` wakes it, by which time the reducer has already put the
+  state back to `Playing`. The end then looked like an ordinary `Finished`, the
+  artist run advanced in the same instant, and the key pressed for one song
+  started its neighbour. `audio::PlayerEvent::EndedWhilePaused` now carries that
+  distinction: `CommandBackend` remembers that the user was holding a track paused
+  and that it never became audible again after the wake-up (and checks for a child
+  that was already gone *before* signalling it, because `kill()` on a zombie
+  succeeds), and the reducer answers that event by restarting the paused song and
+  saying `X ended while paused — starting it again` rather than by advancing.
+  A track that ends at or past its tagged length is still a real end, so the run
+  still moves on at the end of a song paused near it. Tests:
+  `tests/pause_outlives_decoder.rs` drives the real event loop, the real audio
+  worker and a **real decoder process** that runs out of song behind the stop
+  (it fails with "the next song started" without the fix), two more process-level
+  cases in `src/audio/command_backend.rs`, and two reducer cases for both halves
+  of the event.
 * **A scan can no longer put a progress message ahead of the first row.** The
   progress throttle was seeded with "never sent", so its very first call always
   passed the gate; whenever the walker won the race against the tagging workers —

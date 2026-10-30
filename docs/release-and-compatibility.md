@@ -96,6 +96,14 @@ changes belong in that file and nowhere else.
 position and `Finished` after the duration read from the file, so the whole
 auto-advance behaviour is testable and demonstrable without audio hardware.
 
+Pause is a signal, not a pause button inside the player: `SIGSTOP` freezes the
+process but not the clock it measures itself against, and a stopped process
+cannot exit. A song paused long enough may therefore be finished — or its decoder
+gone, if PulseAudio/PipeWire dropped the idle stream — and that can only be seen
+when it is woken again. `mutui` treats such an end as part of the pause: the
+`Space` that woke it restarts the same song (`X ended while paused — starting it
+again`) and never advances the run.
+
 ### Rust toolchain
 
 | rustc | Result |

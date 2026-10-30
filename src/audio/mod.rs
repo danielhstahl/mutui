@@ -87,6 +87,21 @@ pub enum PlayerEvent {
         /// Human readable reason (surfaced in the footer).
         reason: String,
     },
+    /// The track the user was **holding paused** turned out to be over.
+    ///
+    /// `SIGSTOP` freezes a process but not the clock it measures itself against:
+    /// a stopped decoder cannot exit, so a player whose remaining audio or
+    /// device session died during the pause can only be reaped once `Resume`
+    /// wakes it — by which point the UI has already been told the song is
+    /// playing again. Reporting that as [`PlayerEvent::Finished`] is what makes
+    /// the run walk on and the press of `Space` start the *next* song instead of
+    /// the paused one (`mutu-1sg`, `mutu-nb3` and the report that survived both).
+    EndedWhilePaused {
+        /// Id the play request was tagged with.
+        track_id: u64,
+        /// Human readable reason (surfaced in the footer).
+        reason: String,
+    },
     /// A control request (pause/seek/volume) was refused by the backend. Does
     /// not stop playback; the UI shows the reason in the footer.
     Notice(String),
