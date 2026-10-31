@@ -3,3 +3,6 @@
 *.snap.new
 *.log
 .transcripts/
+.fathom/index.sqlite3
+.fathom/frame-report.json
+.fathom/objects
