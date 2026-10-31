@@ -851,6 +851,77 @@ fn a_paused_song_that_fails_does_not_skip_ahead() {
     assert_eq!(file_of(&effects), name(4), "space retries the same row");
 }
 
+/// The half of the report that a `Finished` cannot express: a stopped decoder
+/// cannot exit, so a paused song that ran out of song (or whose device session
+/// was reaped) is only noticed *after* `Space` woke it and the app already
+/// believes the song is playing again. The press that asked for the paused song
+/// must still be the press that gets it (`mutu-1sg`, `mutu-nb3`).
+#[test]
+fn a_song_that_ends_the_moment_it_is_woken_replays_instead_of_advancing() {
+    let mut app = ready_state();
+    play_and_pause(&mut app, 3, 1_000);
+    let track_id = app.playback.track_id().expect("a paused song");
+    let_minutes_pass(&mut app, 1_010, 5);
+
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 310_000);
+    assert_eq!(effects, vec![Effect::Command(PlayerCommand::Resume)]);
+
+    let effects = reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::EndedWhilePaused {
+            track_id,
+            reason: "mpv had already reached its end".to_string(),
+        }),
+        310_050,
+    );
+    assert_eq!(
+        file_of(&effects),
+        name(3),
+        "the woken song comes back instead of the next one: {effects:?}"
+    );
+    assert_eq!(app.playback.index(), Some(3));
+    assert_eq!(app.playlist.cursor(), Some(3));
+    assert!(
+        matches!(app.playback, PlaybackState::Playing { .. }),
+        "and it is playing: {:?}",
+        app.playback
+    );
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("ended while paused")),
+        "the footer says why it started again: {:?}",
+        app.notice
+    );
+    assert_eq!(app.failures, 0, "this is not a failed file");
+}
+
+/// The same event arriving while the screen still says `Paused` (a pause the
+/// backend refused, a decoder that died before the stop landed): hold the row
+/// and wait for `Space`, exactly like a quiet `Finished`.
+#[test]
+fn an_ended_paused_song_found_without_a_resume_holds_the_row() {
+    let mut app = ready_state();
+    let track_id = play_and_pause(&mut app, 3, 1_000);
+    let effects = reduce(
+        &mut app,
+        Msg::Player(PlayerEvent::EndedWhilePaused {
+            track_id,
+            reason: "the decoder died when it was woken (exit 1)".to_string(),
+        }),
+        200_000,
+    );
+    assert!(
+        effects.is_empty(),
+        "nothing may start by itself while the user holds the pause: {effects:?}"
+    );
+    assert!(matches!(app.playback, PlaybackState::Paused { .. }));
+    assert_eq!(app.playback.index(), Some(3));
+    assert!(app.paused_track_ended);
+    let effects = reduce(&mut app, key(KeyCode::Char(' ')), 200_100);
+    assert_eq!(file_of(&effects), name(3), "space replays that song");
+}
+
 /// The periodic background sync (a minute apart) can re-sort the library while
 /// a song is paused. The pause belongs to the *song*, not to the row number it
 /// happened to be on, otherwise `Space` replays whatever row the old number now

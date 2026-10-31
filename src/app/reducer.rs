@@ -115,6 +115,7 @@ fn quit(state: &mut AppState) -> Vec<Effect> {
     let mut effects = Vec::new();
     if state.playback.is_active() {
         state.playback = PlaybackState::Stopping;
+        state.playback_path = None;
         effects.push(Effect::Command(PlayerCommand::Stop));
     }
     effects.push(Effect::Quit);
@@ -178,7 +179,10 @@ fn finish_library_scan(state: &mut AppState, report: ScanReport) {
     if unchanged {
         state.scan_stage.clear();
     } else if state.scan.streaming {
-        state.playlist.finish_scan(anchor.as_ref());
+        // Sorting the streamed rows moves every one of them, so this is a
+        // refresh like any other: `finish_first_scan` re-anchors playback by
+        // path instead of leaving the index pointing at a neighbour.
+        state.finish_first_scan(anchor.as_ref());
     } else {
         let mut tracks = std::mem::take(&mut state.scan_stage);
         let (added, removed) = if first_load {
@@ -240,7 +244,7 @@ fn finish_library_scan(state: &mut AppState, report: ScanReport) {
         ));
     }
     // Keep the playing row on screen after the re-sort.
-    if let Some(index) = state.playback.index() {
+    if let Some(index) = state.playback_row() {
         state.scroll.ensure_visible(index);
     }
 }
@@ -329,6 +333,7 @@ fn reduce_player(state: &mut AppState, event: PlayerEvent, now: u64) -> Vec<Effe
                 .unwrap_or_else(|| "file".to_string());
             if state.failures >= MAX_CONSECUTIVE_FAILURES {
                 state.playback = PlaybackState::Idle;
+                state.playback_path = None;
                 state.position = std::time::Duration::ZERO;
                 state.notice = Some(Notice::error(
                     format!(
@@ -342,6 +347,20 @@ fn reduce_player(state: &mut AppState, event: PlayerEvent, now: u64) -> Vec<Effe
             // Set after advancing so the reason is what the user reads.
             state.notice = Some(Notice::warn(format!("Skipping {title}: {reason}"), now));
             return effects;
+        }
+        PlayerEvent::EndedWhilePaused { track_id, reason } => {
+            if state.playback.track_id() != Some(track_id) {
+                return Vec::new();
+            }
+            if state.playback.is_playing() {
+                // The end was only visible because `Space` woke the decoder, so
+                // the state goes back to the pause that was really still held.
+                let index = state.playback.index().unwrap_or(0);
+                state.playback = PlaybackState::Paused { track_id, index };
+                state.paused_track_ended = true;
+                return restart_song_the_pause_outlived(state, reason, now);
+            }
+            return hold_paused_song(state, now, Some(reason));
         }
         PlayerEvent::Notice(text) => {
             state.notice = Some(Notice::warn(text, now));
@@ -358,11 +377,7 @@ fn reduce_player(state: &mut AppState, event: PlayerEvent, now: u64) -> Vec<Effe
 /// moves to the next song" (mutu-1sg). Keep the paused row, remember that its
 /// song is over, and let `Space` restart it.
 fn hold_paused_song(state: &mut AppState, now: u64, reason: Option<String>) -> Vec<Effect> {
-    let title = state
-        .playlist
-        .current()
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| "Song".to_string());
+    let title = state.playback_title().unwrap_or_else(|| "Song".to_string());
     tracing::debug!(title, "paused song ended; holding the paused row");
     state.paused_track_ended = true;
     state.notice = Some(Notice::warn(
@@ -373,6 +388,29 @@ fn hold_paused_song(state: &mut AppState, now: u64, reason: Option<String>) -> V
         now,
     ));
     Vec::new()
+}
+
+/// The user's `Space` woke a decoder that had already died behind the pause.
+///
+/// The press asked for *that* song, so it gets that song: the row is replayed by
+/// path, exactly like a paused song that ended quietly. Advancing instead — which
+/// is what a `Finished` here does — is the reported "pause, walk away, press
+/// space, it skipped to the next song".
+fn restart_song_the_pause_outlived(state: &mut AppState, reason: String, now: u64) -> Vec<Effect> {
+    let title = state.playback_title().unwrap_or_else(|| "Song".to_string());
+    tracing::debug!(
+        title,
+        reason,
+        "paused song was already over when it was woken; replaying it"
+    );
+    let effects = replay_paused_song(state, now);
+    if state.playback.is_playing() {
+        state.notice = Some(Notice::warn(
+            format!("{title} ended while paused ({reason}) — starting it again"),
+            now,
+        ));
+    }
+    effects
 }
 
 /// Auto-advance inside the artist run, or stop at its end.
@@ -396,6 +434,7 @@ fn advance_run(state: &mut AppState, now: u64) -> Vec<Effect> {
                 }
             };
             state.playback = PlaybackState::Idle;
+            state.playback_path = None;
             state.position = std::time::Duration::ZERO;
             match reason {
                 RunEnded::EmptyList => {
@@ -577,14 +616,7 @@ fn toggle_pause_or_play(state: &mut AppState, now: u64) -> Vec<Effect> {
         }
         PlaybackState::Paused { track_id, index } => {
             if state.paused_track_ended {
-                // The song that was paused is over (its player ended while the
-                // screen said `Paused`). Replay *that* song: falling through to
-                // `selected()` would start whatever row the cursor drifted to,
-                // which is what looked like "space skips to the next song".
-                state.paused_track_ended = false;
-                // The restart is deliberate, so it is not a duplicate click.
-                state.last_play = None;
-                return play_row(state, index, now);
+                return replay_paused_song(state, now);
             }
             state.playback = PlaybackState::Playing { track_id, index };
             vec![Effect::Command(PlayerCommand::Resume)]
@@ -593,6 +625,32 @@ fn toggle_pause_or_play(state: &mut AppState, now: u64) -> Vec<Effect> {
             .selected()
             .map_or(Vec::new(), |index| play_row(state, index, now)),
     }
+}
+
+/// `Space` on a paused song that can no longer be woken up.
+///
+/// The row it belongs to may have moved since the pause — a library refresh in
+/// between sorts rows, adds and deletes them — so the song is looked up by path
+/// again and only then replayed (`mutu-nb3`: replaying the stale row number is
+/// exactly "pause, a refresh happens, unpause skips to the next song"). When
+/// the song itself is gone there is nothing to replay, and starting the row its
+/// old number now names would be the same skip wearing a different hat.
+fn replay_paused_song(state: &mut AppState, now: u64) -> Vec<Effect> {
+    state.paused_track_ended = false;
+    let title = state.playback_title().unwrap_or_else(|| "Song".to_string());
+    let Some(index) = state.playback_row() else {
+        state.playback = PlaybackState::Idle;
+        state.playback_path = None;
+        state.position = std::time::Duration::ZERO;
+        state.notice = Some(Notice::warn(
+            format!("{title} is no longer in the library — nothing to resume"),
+            now,
+        ));
+        return vec![Effect::Command(PlayerCommand::Stop)];
+    };
+    // The restart is deliberate, so it is not a duplicate click.
+    state.last_play = None;
+    play_row(state, index, now)
 }
 
 fn step_within_run(state: &mut AppState, direction: i8, now: u64) -> Vec<Effect> {

@@ -217,6 +217,13 @@ pub struct CommandBackend {
     paused_at: Option<Instant>,
     paused_total: Duration,
     last_position: Duration,
+    /// Length from the tags, used to tell a real end of file from a decoder that
+    /// died the moment it was woken.
+    duration: Option<Duration>,
+    /// `true` from a successful `pause` until the track proves it is audible
+    /// again (one position event after the pause). Everything that ends a track
+    /// while this is set ended *during the user's pause*, not in front of them.
+    held_paused: bool,
     volume: f32,
     pending: Vec<PlayerEvent>,
 }
@@ -235,6 +242,8 @@ impl CommandBackend {
             paused_at: None,
             paused_total: Duration::ZERO,
             last_position: Duration::ZERO,
+            duration: None,
+            held_paused: false,
             volume: 1.0,
             pending: Vec::new(),
         }
@@ -256,6 +265,71 @@ impl CommandBackend {
             anchor.elapsed()
         };
         self.start_offset + raw.saturating_sub(self.paused_total)
+    }
+
+    /// Reap the child if it has exited and freeze the clocks, returning its
+    /// exit status.
+    ///
+    /// A child stopped by `SIGSTOP` **cannot** exit, so this never reports a song
+    /// that died during a pause — it reports the ones that were already gone
+    /// (or already zombies) before the stop landed.
+    fn reap_if_exited(&mut self) -> Option<std::process::ExitStatus> {
+        let status = match self.child.as_mut().and_then(|child| child.try_wait().ok()) {
+            Some(Some(status)) => status,
+            // Still running, or `waitpid` said something odd: leave the clocks
+            // alone.
+            _ => return None,
+        };
+        // Already reaped by `try_wait`, so dropping the handle leaves no zombie.
+        self.child = None;
+        self.anchor = None;
+        self.paused_at = None;
+        self.paused_total = Duration::ZERO;
+        Some(status)
+    }
+
+    /// `true` when the tag length says the track was genuinely at its end.
+    ///
+    /// Deliberately unforgiving (no tolerance): a guessed head start is far
+    /// cheaper than losing a song the user was about to hear again, and the
+    /// position clock is only as good as the wall clock it stands on.
+    fn at_track_end(&self, position: Duration) -> bool {
+        self.duration.is_some_and(|length| position >= length)
+    }
+
+    /// Turn a child's exit status into the event the UI needs.
+    ///
+    /// The distinction matters: a track that ends while `held_paused` is set was
+    /// not heard by anyone. Calling that `Finished` advances the run, so the one
+    /// key press the user gave that song — `Space` — starts the *next* one
+    /// instead (the report that `mutu-1sg` and `mutu-nb3` between them did not
+    /// cover: the decoder can outlive its own pause, because `SIGSTOP` stops the
+    /// process and not the clock it counts against).
+    fn exit_event(&self, status: std::process::ExitStatus, position: Duration) -> PlayerEvent {
+        let track_id = self.track_id;
+        let code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        if self.held_paused && !self.at_track_end(position) {
+            let reason = if status.success() {
+                format!("{} had already reached its end", self.spec.label)
+            } else {
+                format!("{} died when it was woken (exit {code})", self.spec.label)
+            };
+            return PlayerEvent::EndedWhilePaused { track_id, reason };
+        }
+        if status.success() {
+            PlayerEvent::Finished { track_id }
+        } else {
+            PlayerEvent::Failed {
+                track_id,
+                reason: format!(
+                    "{} exited with {code} (unsupported or unreadable file)",
+                    self.spec.label
+                ),
+            }
+        }
     }
 
     fn signal(&self, signal: i32) -> Result<(), String> {
@@ -295,6 +369,7 @@ impl CommandBackend {
         self.anchor = None;
         self.paused_at = None;
         self.paused_total = Duration::ZERO;
+        self.held_paused = false;
     }
 
     /// Relaunch the current track at `start`.
@@ -361,6 +436,7 @@ impl Backend for CommandBackend {
             return Err(format!("file is gone: {}", req.path.display()));
         }
         self.track_id = req.track_id;
+        self.duration = req.duration;
         self.path = Some(req.path.clone());
         self.spawn_at(None)?;
         self.pending.push(PlayerEvent::Started {
@@ -375,6 +451,7 @@ impl Backend for CommandBackend {
         }
         self.signal(libc_stop())?;
         self.paused_at = Some(Instant::now());
+        self.held_paused = true;
         Ok(())
     }
 
@@ -385,6 +462,18 @@ impl Backend for CommandBackend {
         if self.child.is_none() {
             // The decoder went away while paused; there is nothing to wake up.
             return Err("the paused song has already ended".to_string());
+        }
+        // Look before signalling: `kill()` on a process that has already exited
+        // succeeds, so a decoder that was gone before the stop landed (or that
+        // the stop never reached) would otherwise be reported as resumed while
+        // the song is over. Its end belongs to the pause, not to the user.
+        let position = self.elapsed();
+        if let Some(status) = self.reap_if_exited() {
+            let event = self.exit_event(status, position);
+            self.path = None;
+            self.held_paused = false;
+            self.pending.push(event);
+            return Ok(());
         }
         self.signal(libc_cont())?;
         self.paused_at = None;
@@ -431,34 +520,20 @@ impl Backend for CommandBackend {
     }
 
     fn poll(&mut self) -> Vec<PlayerEvent> {
-        if let Some(child) = self.child.as_mut()
-            && let Ok(Some(status)) = child.try_wait()
-        {
-            let track_id = self.track_id;
-            self.child = None;
-            self.anchor = None;
+        let position = self.elapsed();
+        if let Some(status) = self.reap_if_exited() {
+            let event = self.exit_event(status, position);
             self.path = None;
-            self.paused_at = None;
-            if status.success() {
-                self.pending.push(PlayerEvent::Finished { track_id });
-            } else {
-                let code = status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".to_string());
-                self.pending.push(PlayerEvent::Failed {
-                    track_id,
-                    reason: format!(
-                        "{} exited with {code} (unsupported or unreadable file)",
-                        self.spec.label
-                    ),
-                });
-            }
+            self.held_paused = false;
+            self.pending.push(event);
         }
         if self.child.is_some() && self.paused_at.is_none() {
             let position = self.elapsed();
             if position.saturating_sub(self.last_position) >= POSITION_INTERVAL {
                 self.last_position = position;
+                // Proof that the song is audible again: from here on an end is
+                // an end the user actually heard.
+                self.held_paused = false;
                 self.pending.push(PlayerEvent::Position {
                     track_id: self.track_id,
                     position,
@@ -550,22 +625,28 @@ mod tests {
     #[cfg(unix)]
     impl FakePlayer {
         fn new(name: &str) -> Self {
+            Self::with_script(name, "#!/bin/sh\nexec sleep 300\n")
+        }
+
+        /// A decoder that runs `script` instead of the long `sleep`, so a test
+        /// can stage what the *player* does (end, die, survive a stop).
+        fn with_script(name: &str, script: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let dir = std::env::temp_dir().join(format!("mutu-cmd-backend-{name}"));
             let _remove = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("temp dir");
-            let script = dir.join("fakedecoder");
+            let script_path = dir.join("fakedecoder");
             // `exec` so that the child *is* `sleep`: reaping it leaves nothing
             // behind, and a stopped `sleep` really is a stopped process.
-            std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").expect("script");
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            std::fs::write(&script_path, script).expect("script");
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
             let track = dir.join("song.mp3");
             std::fs::write(&track, b"the decoder never reads this").expect("fixture");
             // Same switches as mpv: volume and start position are spawn-time
             // arguments, so both are implemented by relaunching the child.
             let mpv = KNOWN_PLAYERS[0].clone();
-            let bin = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+            let bin = Box::leak(script_path.to_string_lossy().into_owned().into_boxed_str());
             Self {
                 spec: PlayerSpec {
                     bin,
@@ -833,6 +914,103 @@ mod tests {
         );
         be.stop();
         player.cleanup();
+    }
+
+    /// The report, at the process level: `SIGSTOP` stops a process, not the
+    /// clock that process measures itself against. A decoder that runs out of
+    /// song while it is stopped cannot exit until it is woken, so nothing can be
+    /// reaped while the screen says `Paused` — and the moment `Space` wakes it,
+    /// it is gone. That end belongs to the pause: reporting it as an ordinary
+    /// `Finished` is what made the run walk on and `Space` start the next song
+    /// (`mutu-1sg`/`mutu-nb3`, and the report that outlived both fixes).
+    #[cfg(unix)]
+    #[test]
+    fn a_decoder_that_runs_out_of_song_while_stopped_ends_the_paused_song() {
+        let player = FakePlayer::with_script("died-on-resume", "#!/bin/sh\nexec sleep 0.3\n");
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        std::thread::sleep(Duration::from_millis(60));
+        be.pause().expect("pause");
+        // Far past the decoder's own 0.3 s, and it is still there, stopped: its
+        // end is invisible until something wakes it.
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(child_state_is(&be, 'T'), "stopped, not reaped");
+        let quiet = pump(&mut be, 100);
+        assert!(
+            quiet
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Finished { .. } | PlayerEvent::Failed { .. })),
+            "a stopped decoder has no observable end yet: {quiet:?}"
+        );
+        be.resume()
+            .expect("the child exists, so the resume is a real SIGCONT");
+        let events = pump(&mut be, 400);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PlayerEvent::EndedWhilePaused { track_id: 1, .. })),
+            "waking it reveals an end the user never heard: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Finished { .. } | PlayerEvent::Failed { .. })),
+            "and it must not be filed as a track that played out: {events:?}"
+        );
+        player.cleanup();
+    }
+
+    /// A child that was already gone before the `SIGSTOP` landed (the stop of a
+    /// zombie simply succeeds) must not be reported as resumed: `Space` asked
+    /// for that song, and the only honest answer is that it is over.
+    #[cfg(unix)]
+    #[test]
+    fn resuming_a_decoder_that_was_already_gone_reports_the_end_not_a_resume() {
+        let player = FakePlayer::with_script("gone-behind-the-stop", "#!/bin/sh\nexit 0\n");
+        let mut be = player.backend();
+        be.play(&player.req(7)).expect("play");
+        std::thread::sleep(Duration::from_millis(150));
+        // No `poll` in between: the pause is taken by a process that is already
+        // a zombie, exactly the state a `SIGSTOP` leaves behind.
+        be.pause().expect(" signalling an unreaped child succeeds");
+        be.resume()
+            .expect("nothing was woken, so no resume is claimed");
+        let events = pump(&mut be, 100);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PlayerEvent::EndedWhilePaused { track_id: 7, .. })),
+            "the end is reported instead: {events:?}"
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    /// A track that really did play to its tagged length is a normal end, even
+    /// if it was paused a moment before: the run has to advance.
+    #[test]
+    fn a_track_at_its_tagged_length_is_a_real_end_even_straight_after_a_pause() {
+        let spec = KNOWN_PLAYERS[0].clone();
+        let mut be = CommandBackend::new(spec);
+        be.duration = Some(Duration::from_secs(200));
+        assert!(
+            !be.at_track_end(Duration::from_secs(12)),
+            "a song that died at 0:12 of 3:20 did not finish"
+        );
+        assert!(
+            be.at_track_end(Duration::from_secs(200)),
+            "a song that reached its tagged length did"
+        );
+        assert!(
+            !be.at_track_end(Duration::from_secs(199)),
+            "one second short of its tagged length is still a song the user \
+             never heard the end of"
+        );
+        be.duration = None;
+        assert!(
+            !be.at_track_end(Duration::from_secs(199)),
+            "an unknown length is never assumed to have been reached"
+        );
     }
 
     #[cfg(unix)]

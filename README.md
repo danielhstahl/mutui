@@ -79,7 +79,7 @@ to keep the mouse entirely to the terminal.
 | --- | --- |
 | `q`, `Esc`, `Ctrl-C` | quit |
 | `Enter` | play the selected row |
-| `Space` | pause / resume (replays the paused song if its player ended while paused) |
+| `Space` | pause / resume (replays the paused song if its player ended or died while paused, and finds it again if the library refreshed in between) |
 | `Up`/`Down`, `j`/`k` | move the selection |
 | `PageUp`/`PageDown` | scroll by one page |
 | `Home` / `End` | jump to the first / last song |
@@ -194,6 +194,14 @@ the child process; pause/resume use `SIGSTOP`/`SIGCONT`, so pausing really stops
 the clock and no position events are emitted while paused. Volume (and seek) are
 spawn-time switches for these players, so they are applied by relaunching the
 same file at the same position — which keeps a pause paused.
+
+One thing a signal cannot do: `SIGSTOP` stops the player process, not the clock
+it measures itself against, and a stopped process cannot exit. A song paused for
+a long time can therefore already be over — or its decoder long gone, if the
+audio server dropped the idle stream — and that is only noticed when the wake-up
+happens. `music-tui` files such an end under the pause instead of under the run:
+the `Space` that woke it restarts *that* song and the footer says so, rather than
+quietly starting the next one.
 
 ## Diagnostics
 
