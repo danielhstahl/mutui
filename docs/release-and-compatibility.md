@@ -87,7 +87,7 @@ changes belong in that file and nowhere else.
 | --- | --- | --- | --- |
 | Linux (X11 or Wayland) | `mpv` → `ffplay` → `mpg123` → `mpg321` → `madplay` → `mplayer` | `SIGSTOP`/`SIGCONT` | player switch |
 | FreeBSD | same lookup, via `which` | `SIGSTOP`/`SIGCONT` | player switch |
-| macOS | `afplay` (or a Homebrew `mpv`) | `SIGSTOP`/`SIGCONT` | `afplay -v` |
+| macOS | `afplay` (or a Homebrew `mpv`) | `mpv`/`ffplay`: `SIGSTOP`/`SIGCONT`. `afplay`: the song is stopped and replayed from the top — see below | `afplay -v` |
 | Windows (native) | works if a listed player is on `PATH` | **no** — `SIGSTOP` is POSIX; the footer shows "not supported" and playback continues | player switch |
 | Windows under WSL | as Linux | yes | yes |
 | Container / CI / SSH without audio | falls back to `silent` with a footer note | simulated | simulated |
@@ -102,7 +102,20 @@ cannot exit. A song paused long enough may therefore be finished — or its deco
 gone, if PulseAudio/PipeWire dropped the idle stream — and that can only be seen
 when it is woken again. `mutui` treats such an end as part of the pause: the
 `Space` that woke it restarts the same song (`X ended while paused — starting it
-again`) and never advances the run.
+again`) and never advances the run. Even a wake-up that only survives a moment
+(`RESUME_GRACE`, 750 ms) counts as part of the pause, because the position clock
+is the app's own wall clock and ticks whether or not anything is audible.
+
+**`afplay` is the exception, and it is a mac one.** `SIGSTOP` freezes the process,
+not the audio: `afplay` has already handed its samples to `coreaudiod`, so a
+stopped `afplay` keeps emitting whatever it queued (the "short blip a few seconds
+after I paused"), and the queue it was feeding is finished or dropped behind the
+stop. Its option set is `-v`/`-t`/`-r`/`-q`/`-d` — there is no start-position
+switch, so it cannot pick a song up in the middle either. `afplay` is therefore
+paused by *killing* it (nothing is left to make a sound) and resumed by launching
+it again from the beginning, with `afplay has no mid-song resume: it starts
+again from the beginning` in the footer and a matching note when the app starts.
+`brew install mpv` (or `ffplay`) and pause/resume becomes a real one.
 
 ### Rust toolchain
 

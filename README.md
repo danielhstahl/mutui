@@ -35,7 +35,9 @@ The stack and threading decisions are in
   of these that is on `PATH`: `mpv`, `ffplay`, `mpg123`, `mpg321`, `madplay`,
   `afplay` (macOS), `mplayer`. Install one if you want audio.
   Without one, the app still runs and behaves exactly the same, but silently
-  (see [Backends](#backends)).
+  (see [Backends](#backends)). `afplay` is the weakest of them — it cannot be
+  paused mid-song (see [Backends](#backends)), so `brew install mpv` is worth it
+  on a mac.
 
 No `libasound`/ALSA headers, no GStreamer, no `rodio`/`cpal`: that is deliberate,
 see ADR 0001 §3.
@@ -79,7 +81,7 @@ to keep the mouse entirely to the terminal.
 | --- | --- |
 | `q`, `Esc`, `Ctrl-C` | quit |
 | `Enter` | play the selected row |
-| `Space` | pause / resume (replays the paused song if its player ended or died while paused, and finds it again if the library refreshed in between) |
+| `Space` | pause / resume (replays the paused song if its player ended or died while paused, and finds it again if the library refreshed in between; with a player that has no pause — macOS `afplay` — it replays it from the top) |
 | `Up`/`Down`, `j`/`k` | move the selection |
 | `PageUp`/`PageDown` | scroll by one page |
 | `Home` / `End` | jump to the first / last song |
@@ -190,10 +192,22 @@ artist. Hidden directories and dot-files are skipped.
 | `mock` | records commands and replays scripted events; used by the test-suite |
 
 The player runs on its own worker thread. End of track is detected by reaping
-the child process; pause/resume use `SIGSTOP`/`SIGCONT`, so pausing really stops
-the clock and no position events are emitted while paused. Volume (and seek) are
-spawn-time switches for these players, so they are applied by relaunching the
-same file at the same position — which keeps a pause paused.
+the child process.
+
+**Pause has two implementations, because `SIGSTOP` freezes a process and not its
+audio.** Normally pause/resume is `SIGSTOP`/`SIGCONT`, so pausing really stops the
+clock and no position events are emitted while paused. A player that has already
+handed its samples to an audio server is the exception: `afplay` (the one macOS
+ships) keeps emitting what `coreaudiod` still holds after it is stopped — the
+blip a few seconds after you pause — and its queue is finished or dropped by the
+time it is woken, so it exits on the wake-up and used to read as "that song is
+over", starting the next one. `afplay` is therefore paused by *killing* it and
+resumed by launching it again; it has no start-position switch, so that means
+from the beginning, and it says so (`afplay has no mid-song resume: it starts
+again from the beginning`). `brew install mpv` (or `ffplay`) and pause/resume
+behaves like it does on Linux. Volume (and seek) are spawn-time switches for
+these players, so they are applied by relaunching the same file at the same
+position — which keeps a pause paused.
 
 One thing a signal cannot do: `SIGSTOP` stops the player process, not the clock
 it measures itself against, and a stopped process cannot exit. A song paused for
@@ -201,7 +215,9 @@ a long time can therefore already be over — or its decoder long gone, if the
 audio server dropped the idle stream — and that is only noticed when the wake-up
 happens. `music-tui` files such an end under the pause instead of under the run:
 the `Space` that woke it restarts *that* song and the footer says so, rather than
-quietly starting the next one.
+quietly starting the next one. A position event is no proof that anything was
+heard again — that clock is the app's own — so a decoder that dies within three
+quarters of a second of being woken still ends the pause, not the run.
 
 ## Diagnostics
 
@@ -222,6 +238,11 @@ Common problems:
   terminal; use `--dump-sort` if you wanted the sorted list.
 * **Nothing is audible** — no decoder is installed (see the footer, which names
   the active backend), or the player failed to open the file (check the log).
+* **A few notes escape after pausing, or the next song starts when you resume** —
+  that is `afplay` on macOS, whose audio lives in `coreaudiod` rather than in its
+  own process. Current builds stop the player outright, so nothing can blip, and
+  `Space` replays the same song from the top; install `mpv` or `ffplay` for a
+  pause that resumes where it stopped.
 * **The mouse selects text instead of clicking** — you started with
   `--no-mouse`, or your terminal captures the drag (tmux: `set -g mouse on`).
 * **Garbled glyphs** — `--ascii` for terminals without Unicode.
