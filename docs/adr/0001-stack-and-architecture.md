@@ -47,7 +47,7 @@ runtime with `--backend`:
 | backend   | what it does                                                                                   |
 |-----------|------------------------------------------------------------------------------------------------|
 | `auto`    | pick the first known external player found on `PATH`; otherwise fall back to `silent` and say so in the footer |
-| `command` | `audio::CommandBackend`: spawn the first of `mpv`/`ffplay`/`mpg123`/`mpg321`/`madplay`/`afplay`/`mplayer` found on `PATH`, end-of-track detected by reaping the child, pause = `SIGSTOP`, resume = `SIGCONT` |
+| `command` | `audio::CommandBackend`: spawn the first of `mpv`/`ffplay`/`mpg123`/`mpg321`/`madplay`/`afplay`/`mplayer` found on `PATH`; end of track detected by reaping the child; pause per `PlayerSpec::pause` — `SIGSTOP`/`SIGCONT`, or kill-and-relaunch for a player whose samples already left the process (`afplay`) |
 | `silent`  | `audio::NullBackend`: no sound, perfect timing events (drives the headless tests and machines without audio) |
 | `mock`    | `audio::MockBackend`: records commands and replays scripted events (test support)              |
 
@@ -59,7 +59,15 @@ player and no player outlives us.
 against, and a stopped process cannot exit. A player paused for minutes can
 therefore already be finished (or gone) by the time `SIGCONT` wakes it, and the
 end is only visible then — see §4 for the event the backend must report in that
-case.
+case. Nor does `SIGSTOP` stop the *audio*: samples already handed to an audio
+server keep playing out of the server's buffers, and the server's side of the
+session can be finished or dropped while the client is frozen. A player in that
+situation (`afplay`, whose samples live in `coreaudiod`, and which has no
+start-position switch either) is declared `PauseMode::Kill`: pausing kills it —
+so nothing is left to make a sound — and resuming launches it again, from the
+remembered position when the player has a switch for one and from the beginning
+when it has not (said out loud in the footer, because `Space` did not do what it
+says on the tin).
 
 A `rodio` backend remains a drop-in addition: implement `audio::Backend`
 (`play/pause/resume/stop/seek/set_volume/poll`) and add it to
@@ -145,6 +153,10 @@ asked for the paused song. A backend therefore reports it as
 of it again": if the state is already `Playing` (the `Space` that woke it) the
 reducer puts the state back to `Paused`, spends the flag, and replays *that*
 song; if it is still `Paused` it behaves exactly like a quiet `Finished`.
+A position event is not proof that anything was audible — the clock the backend
+reports is its own wall clock — so an end that arrives within `RESUME_GRACE`
+(750 ms) of a wake-up belongs to the pause as well, and a `Kill` backend cannot
+produce one at all, because its resume is a decoder that demonstrably started.
 
 Which row that is, is a fact about the library, not about playback: `AppState`
 remembers the current song by **path** (`AppState::playback_path`) and every
@@ -217,8 +229,11 @@ selection (`--no-mouse` disables capture entirely). Consequence:
 * **Linux**: no build-time system dependencies at all (that was the point of §3).
   Playback needs one of the players in §3 at runtime; ALSA/Pulse/PipeWire is the
   player's problem, not ours.
-* **macOS**: `afplay` is always present, so `auto` works out of the box.
-  `SIGSTOP`/`SIGCONT` behave as on Linux.
+* **macOS**: `afplay` is always present, so `auto` works out of the box — but it
+  is the one known player that cannot be paused properly (see §3), which is why
+  it is `PauseMode::Kill` and why the footer says `pausing restarts a song from
+  the beginning` when it is the backend in use. `mpv` or `ffplay` from Homebrew
+  restores a real pause/resume.
 * **Windows**: compiles (`Stdio::null`, process reaping are portable); pause is
   reported as unsupported because `SIGSTOP` does not exist (the footer shows the
   refusal and playback continues). Any of the known players works if it is on

@@ -7,7 +7,13 @@
 //!
 //! The child process is spawned with stdin/stdout/stderr attached to `/dev/null`
 //! so nothing can ever corrupt the alternate screen. End of track is detected by
-//! reaping the child; pause/resume use `SIGSTOP`/`SIGCONT`.
+//! reaping the child.
+//!
+//! Pausing is per-player, because "pause a process" does not mean "pause its
+//! audio" ([`PauseMode`]): `SIGSTOP` freezes the *process*, so anything already
+//! handed to the audio server keeps playing without it and its session may be
+//! gone by the time it is woken. Players that talk to such a server (`afplay`,
+//! a CoreAudio client) are paused by killing them and relaunched on resume.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,6 +24,17 @@ use super::{Backend, PlayRequest, PlayerEvent};
 /// Emit a position event at most this often (a few times per second, never per
 /// audio frame — the UI only needs a readable clock).
 pub const POSITION_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a woken decoder has to prove it is audible again.
+///
+/// A position event is *not* that proof: the clock the backend reports is the
+/// application's own wall clock, so it ticks whether or not the decoder makes a
+/// sound. A decoder that its pause left with nothing to play (a CoreAudio queue
+/// that died behind the stop) typically lives for a few hundred milliseconds
+/// after `SIGCONT` before it exits, which is long enough to emit a position and
+/// far too short for anyone to have heard the song. An end inside this window is
+/// an end of the pause, not an end of the track.
+pub const RESUME_GRACE: Duration = Duration::from_millis(750);
 
 /// How a player accepts a volume setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +57,27 @@ pub enum SeekArg {
     Seconds,
 }
 
+/// How a player is paused.
+///
+/// `SIGSTOP` freezes a *process*. It does not freeze the audio that process has
+/// already handed to an audio server, and it does not keep the server's side of
+/// the session alive, which is why one kind of pause cannot fit every player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseMode {
+    /// `SIGSTOP` / `SIGCONT`: the process keeps its own position, so this is the
+    /// only mode that resumes mid-sample. Right for players that keep their
+    /// output inside their own buffer (`mpv`, `ffplay`, `mplayer`).
+    Signal,
+    /// Kill the decoder on pause and relaunch it on resume. Required for a
+    /// player whose samples already left the process: `afplay` queues samples to
+    /// `coreaudiod`, so a stopped `afplay` still emits the queued audio in a
+    /// short blip, and the queue it was reading from is usually finished or
+    /// dropped when `SIGCONT` wakes it — whereupon it exits, which the
+    /// application can only read as "that song is over". Killing means the
+    /// pause is silent and the resume is a decoder that demonstrably works.
+    Kill,
+}
+
 /// A known external player.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerSpec {
@@ -51,6 +89,8 @@ pub struct PlayerSpec {
     pub volume: VolumeArg,
     /// Start-position switch style.
     pub seek: SeekArg,
+    /// How `pause`/`resume` are implemented for this player.
+    pub pause: PauseMode,
 }
 
 /// Known players, in preference order.
@@ -60,42 +100,55 @@ pub const KNOWN_PLAYERS: &[PlayerSpec] = &[
         label: "mpv",
         volume: VolumeArg::Percent,
         seek: SeekArg::Seconds,
+        pause: PauseMode::Signal,
     },
     PlayerSpec {
         bin: "ffplay",
         label: "ffplay",
         volume: VolumeArg::Percent,
         seek: SeekArg::Seconds,
+        pause: PauseMode::Signal,
     },
     PlayerSpec {
         bin: "mpg123",
         label: "mpg123",
         volume: VolumeArg::Scaled,
         seek: SeekArg::None,
+        pause: PauseMode::Signal,
     },
     PlayerSpec {
         bin: "mpg321",
         label: "mpg321",
         volume: VolumeArg::Percent,
         seek: SeekArg::None,
+        pause: PauseMode::Signal,
     },
     PlayerSpec {
         bin: "madplay",
         label: "madplay",
         volume: VolumeArg::None,
         seek: SeekArg::Seconds,
+        pause: PauseMode::Signal,
     },
+    // macOS ships `afplay`, and it is a bad citizen: its only switches are
+    // `-v` (volume), `-t` (play *for* N seconds), `-r` (rate), `-q` and `-d`.
+    // There is **no** start-position switch, so a resume cannot restart
+    // mid-song, and its samples sit in `coreaudiod`, where a `SIGSTOP` cannot
+    // reach them — hence `PauseMode::Kill`. Install `mpv` or `ffplay` for a
+    // pause that resumes where it stopped.
     PlayerSpec {
         bin: "afplay",
         label: "afplay",
         volume: VolumeArg::Scaled,
-        seek: SeekArg::Seconds,
+        seek: SeekArg::None,
+        pause: PauseMode::Kill,
     },
     PlayerSpec {
         bin: "mplayer",
         label: "mplayer",
         volume: VolumeArg::Percent,
         seek: SeekArg::Seconds,
+        pause: PauseMode::Signal,
     },
 ];
 
@@ -189,11 +242,11 @@ impl PlayerSpec {
                 }
             }
             "afplay" => {
-                if let Some(secs) = start.map(|s| s.as_secs_f64())
-                    && secs > 0.0
-                {
-                    args.extend(["-a".into(), format!("{secs:.3}")]);
-                }
+                // No start-position switch exists (`-t` is a *stop* time, not a
+                // seek), and an option `afplay` does not know makes it print its
+                // usage and exit non-zero — so nothing is ever passed here but
+                // the volume.
+                let _ = start;
                 if self.volume != VolumeArg::None {
                     args.extend(["-v".into(), format!("{:.3}", volume.clamp(0.0, 1.0))]);
                 }
@@ -224,6 +277,8 @@ pub struct CommandBackend {
     /// again (one position event after the pause). Everything that ends a track
     /// while this is set ended *during the user's pause*, not in front of them.
     held_paused: bool,
+    /// When a `SIGCONT` last woke a stopped decoder. See [`RESUME_GRACE`].
+    woken_at: Option<Instant>,
     volume: f32,
     pending: Vec<PlayerEvent>,
 }
@@ -244,6 +299,7 @@ impl CommandBackend {
             last_position: Duration::ZERO,
             duration: None,
             held_paused: false,
+            woken_at: None,
             volume: 1.0,
             pending: Vec::new(),
         }
@@ -297,6 +353,14 @@ impl CommandBackend {
         self.duration.is_some_and(|length| position >= length)
     }
 
+    /// `true` when the track's end has to be filed under the pause.
+    fn ends_the_paused_song(&self) -> bool {
+        self.held_paused
+            || self
+                .woken_at
+                .is_some_and(|woken| woken.elapsed() < RESUME_GRACE)
+    }
+
     /// Turn a child's exit status into the event the UI needs.
     ///
     /// The distinction matters: a track that ends while `held_paused` is set was
@@ -311,7 +375,7 @@ impl CommandBackend {
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
-        if self.held_paused && !self.at_track_end(position) {
+        if self.ends_the_paused_song() && !self.at_track_end(position) {
             let reason = if status.success() {
                 format!("{} had already reached its end", self.spec.label)
             } else {
@@ -355,6 +419,14 @@ impl CommandBackend {
         }
     }
 
+    /// Stop the child without touching the position clock.
+    fn kill_child_process(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _kill = child.kill();
+            let _wait = child.wait();
+        }
+    }
+
     /// Reap the decoder process and freeze the position clock.
     ///
     /// `path` is deliberately *not* cleared: `seek` and `set_volume` are
@@ -362,14 +434,28 @@ impl CommandBackend {
     /// forgetting the path here made those commands kill the track instead of
     /// restarting it. `stop` clears it explicitly.
     fn kill_child(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _kill = child.kill();
-            let _wait = child.wait();
-        }
+        self.kill_child_process();
         self.anchor = None;
         self.paused_at = None;
         self.paused_total = Duration::ZERO;
         self.held_paused = false;
+        self.woken_at = None;
+    }
+
+    /// Silence a [`PauseMode::Kill`] player at the current position.
+    ///
+    /// The clocks are re-anchored rather than cleared, so `elapsed()` still
+    /// reads the instant the user paused: that is the position a resume
+    /// relaunches from, and the number the footer keeps showing while paused.
+    fn kill_for_pause(&mut self) {
+        let position = self.elapsed();
+        self.kill_child_process();
+        self.anchor = Some(Instant::now());
+        self.start_offset = position;
+        self.paused_total = Duration::ZERO;
+        self.paused_at = Some(Instant::now());
+        self.last_position = position;
+        self.woken_at = None;
     }
 
     /// Relaunch the current track at `start`.
@@ -380,6 +466,8 @@ impl CommandBackend {
     /// `Paused`, and a respawn that left the decoder running would resume the
     /// song behind the user's back — after which the run advances on its own a
     /// few minutes later and `Space` no longer does what it says (mutu-1sg).
+    /// For a [`PauseMode::Kill`] player the relaunch is the pause: `pause`
+    /// simply kills the child it just started, so nothing is audible.
     fn respawn(&mut self, start: Duration) -> Result<(), String> {
         let was_paused = self.paused_at.take().is_some();
         self.kill_child();
@@ -387,6 +475,51 @@ impl CommandBackend {
         if was_paused {
             self.pause()?;
         }
+        Ok(())
+    }
+
+    /// Bring a [`PauseMode::Kill`] track back: launch a fresh decoder.
+    ///
+    /// A player with a start-position switch comes back at the position the
+    /// pause froze; one without (afplay) can only come back at the beginning,
+    /// which is said out loud rather than passed off as a resume.
+    fn relaunch_after_kill_pause(&mut self) -> Result<(), String> {
+        let position = self.elapsed();
+        let from_the_top = self.spec.seek == SeekArg::None;
+        let start = if from_the_top {
+            Duration::ZERO
+        } else {
+            position
+        };
+        self.paused_at = None;
+        self.paused_total = Duration::ZERO;
+        self.held_paused = false;
+        self.woken_at = None;
+        self.anchor = None;
+        if let Err(reason) = self.spawn_at(Some(start)) {
+            self.pending.push(PlayerEvent::Failed {
+                track_id: self.track_id,
+                reason,
+            });
+            return Ok(());
+        }
+        if from_the_top {
+            self.pending.push(PlayerEvent::Notice(format!(
+                "{} has no mid-song resume: it starts again from the beginning",
+                self.spec.label
+            )));
+        }
+        // The UI clock has to be told too: it was holding the paused position.
+        self.pending.push(PlayerEvent::Position {
+            track_id: self.track_id,
+            position: start,
+        });
+        tracing::debug!(
+            bin = self.spec.bin,
+            ?start,
+            from_the_top,
+            "relaunched the decoder after a kill-pause"
+        );
         Ok(())
     }
 
@@ -409,6 +542,7 @@ impl CommandBackend {
                 self.start_offset = start.unwrap_or(Duration::ZERO);
                 self.paused_total = Duration::ZERO;
                 self.paused_at = None;
+                self.woken_at = None;
                 self.last_position = self.start_offset;
                 tracing::debug!(bin = self.spec.bin, ?args, "spawned player");
                 Ok(())
@@ -449,9 +583,23 @@ impl Backend for CommandBackend {
         if self.paused_at.is_some() {
             return Ok(());
         }
-        self.signal(libc_stop())?;
-        self.paused_at = Some(Instant::now());
-        self.held_paused = true;
+        if self.child.is_none() {
+            return Err("nothing is playing".to_string());
+        }
+        match self.spec.pause {
+            PauseMode::Signal => {
+                self.signal(libc_stop())?;
+                self.paused_at = Some(Instant::now());
+                self.held_paused = true;
+            }
+            PauseMode::Kill => {
+                // Nothing may be left running: a stopped player keeps emitting
+                // whatever the audio server still holds, seconds after the
+                // screen said `Paused`.
+                self.kill_for_pause();
+                self.held_paused = true;
+            }
+        }
         Ok(())
     }
 
@@ -459,9 +607,21 @@ impl Backend for CommandBackend {
         let Some(paused_at) = self.paused_at else {
             return Err("playback is not paused".to_string());
         };
+        if self.spec.pause == PauseMode::Kill {
+            return self.relaunch_after_kill_pause();
+        }
         if self.child.is_none() {
             // The decoder went away while paused; there is nothing to wake up.
-            return Err("the paused song has already ended".to_string());
+            // The press of `Space` still asked for *this* song, so what it gets
+            // is the end of that song, not a silent "playing".
+            let event = PlayerEvent::EndedWhilePaused {
+                track_id: self.track_id,
+                reason: "the player had already ended".to_string(),
+            };
+            self.paused_at = None;
+            self.held_paused = false;
+            self.pending.push(event);
+            return Ok(());
         }
         // Look before signalling: `kill()` on a process that has already exited
         // succeeds, so a decoder that was gone before the stop landed (or that
@@ -478,6 +638,7 @@ impl Backend for CommandBackend {
         self.signal(libc_cont())?;
         self.paused_at = None;
         self.paused_total += paused_at.elapsed();
+        self.woken_at = Some(Instant::now());
         Ok(())
     }
 
@@ -521,6 +682,13 @@ impl Backend for CommandBackend {
 
     fn poll(&mut self) -> Vec<PlayerEvent> {
         let position = self.elapsed();
+        if self
+            .woken_at
+            .is_some_and(|woken| woken.elapsed() >= RESUME_GRACE)
+        {
+            // Past the window in which an end still belongs to the pause.
+            self.woken_at = None;
+        }
         if let Some(status) = self.reap_if_exited() {
             let event = self.exit_event(status, position);
             self.path = None;
@@ -653,6 +821,7 @@ mod tests {
                     label: "fakedecoder",
                     volume: mpv.volume,
                     seek: mpv.seek,
+                    pause: PauseMode::Signal,
                 },
                 track,
                 dir,
@@ -661,6 +830,16 @@ mod tests {
 
         fn backend(&self) -> CommandBackend {
             CommandBackend::new(self.spec.clone())
+        }
+
+        /// Same fake decoder, but paused/seeked like another known player, so
+        /// the CoreAudio situation (`afplay`) can be staged on any unix box.
+        fn backend_with(&self, pause: PauseMode, seek: SeekArg) -> CommandBackend {
+            CommandBackend::new(PlayerSpec {
+                pause,
+                seek,
+                ..self.spec.clone()
+            })
         }
 
         fn req(&self, track_id: u64) -> PlayRequest {
@@ -763,6 +942,7 @@ mod tests {
             label: "ghost",
             volume: VolumeArg::None,
             seek: SeekArg::None,
+            pause: PauseMode::Signal,
         };
         let mut be = CommandBackend::new(spec);
         let err = be
@@ -782,6 +962,7 @@ mod tests {
             label: "ghost",
             volume: VolumeArg::None,
             seek: SeekArg::None,
+            pause: PauseMode::Signal,
         };
         let mut be = CommandBackend::new(spec);
         let path = std::env::temp_dir().join("mutu-cmd-test.txt");
@@ -1023,6 +1204,181 @@ mod tests {
         be.set_volume(0.2)
             .expect("volume applies to the next track");
         assert!(be.child.is_none(), "nothing may be running after a stop");
+        player.cleanup();
+    }
+
+    /// The mac report: `afplay` is the only decoder a stock macOS has, and it
+    /// is a poor one. Its samples are already inside `coreaudiod`, so a
+    /// `SIGSTOP` freezes the player but not the audio it queued (the "short
+    /// blip a few seconds after I paused"), and the queue it was feeding is
+    /// finished or dropped by the time `SIGCONT` wakes it — so it exits then,
+    /// which used to read as an ordinary end of track and start the next song.
+    /// It also has no start-position switch, so anything that passed one made
+    /// `afplay` print its usage and quit.
+    #[test]
+    fn afplay_is_paused_by_killing_and_is_given_no_start_offset() {
+        let afplay = KNOWN_PLAYERS
+            .iter()
+            .find(|spec| spec.bin == "afplay")
+            .expect("afplay is a known player");
+        assert_eq!(
+            afplay.pause,
+            PauseMode::Kill,
+            "stopping the process cannot stop audio that left it"
+        );
+        assert_eq!(
+            afplay.seek,
+            SeekArg::None,
+            "afplay has no start-position switch: -t is a stop time"
+        );
+
+        let args = afplay.args(Path::new("/m/a.mp3"), 0.5, Some(Duration::from_secs(12)));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("-a") || arg.starts_with("-t")),
+            "an option afplay does not know makes it exit with a usage error: {args:?}"
+        );
+        let switches: Vec<&str> = args
+            .iter()
+            .map(String::as_str)
+            .filter(|arg| arg.starts_with('-'))
+            .collect();
+        assert_eq!(
+            switches,
+            vec!["-v"],
+            "volume is the only switch afplay has: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "0.500"), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("/m/a.mp3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pause_that_kills_leaves_nothing_behind_to_make_a_sound() {
+        let player = FakePlayer::new("kill-pause");
+        let mut be = player.backend_with(PauseMode::Kill, SeekArg::Seconds);
+        be.play(&player.req(1)).expect("play");
+        let _started = be.poll();
+        std::thread::sleep(Duration::from_millis(150));
+        be.pause().expect("pause");
+        assert!(
+            be.child.is_none(),
+            "a stopped process can still be draining buffered audio"
+        );
+        let frozen = be.elapsed();
+        assert!(
+            frozen >= Duration::from_millis(100),
+            "the pause still knows where the song was: {frozen:?}"
+        );
+        assert!(
+            pump(&mut be, 200).is_empty(),
+            "a paused track reports nothing at all"
+        );
+
+        be.resume().expect("resume launches a fresh decoder");
+        assert!(be.child.is_some(), "the song came back");
+        let events = pump(&mut be, 400);
+        assert!(
+            positions(&events)
+                .last()
+                .is_some_and(|p| *p >= Duration::from_millis(300)),
+            "the clock runs again: {:?}",
+            positions(&events)
+        );
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                PlayerEvent::Finished { .. }
+                    | PlayerEvent::Failed { .. }
+                    | PlayerEvent::EndedWhilePaused { .. }
+            )),
+            "waking a kill-pause cannot reveal a hidden end: {events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !matches!(e, PlayerEvent::Notice(_))),
+            "a player that can relaunch at a position has nothing to apologise about: {events:?}"
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_player_without_a_start_position_says_it_starts_again_from_the_top() {
+        let player = FakePlayer::new("kill-pause-no-seek");
+        let mut be = player.backend_with(PauseMode::Kill, SeekArg::None);
+        be.play(&player.req(1)).expect("play");
+        let _started = be.poll();
+        std::thread::sleep(Duration::from_millis(200));
+        be.pause().expect("pause");
+        be.resume().expect("resume");
+        let events = be.poll();
+        assert!(
+            events.iter().any(|event| match event {
+                PlayerEvent::Position { track_id, position } =>
+                    *track_id == 1 && position.is_zero(),
+                _ => false,
+            }),
+            "the footer clock has to come back to the top too: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| match event {
+                PlayerEvent::Notice(text) => text.contains("from the beginning"),
+                _ => false,
+            }),
+            "restarting from the top is said out loud, not passed off as a resume: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Finished { .. } | PlayerEvent::Failed { .. })),
+            "{events:?}"
+        );
+        be.stop();
+        player.cleanup();
+    }
+
+    /// The other half of the mac report, for a signal-paused player: `Space`
+    /// wakes a decoder that is only going to live a few hundred milliseconds.
+    /// A position event is no proof that anything was heard — the clock is our
+    /// own — so an end that soon still belongs to the pause.
+    #[cfg(unix)]
+    #[test]
+    fn a_decoder_that_dies_shortly_after_the_wake_ends_the_paused_song() {
+        let player = FakePlayer::with_script(
+            "dies-a-moment-after-the-wake",
+            "#!/bin/sh\nwhile [ ! -e \"$(dirname \"$0\")/go\" ]; do sleep 0.02; done\nexit 0\n",
+        );
+        let mut be = player.backend();
+        be.play(&player.req(1)).expect("play");
+        let _started = be.poll();
+        std::thread::sleep(Duration::from_millis(100));
+        be.pause().expect("pause");
+        std::thread::sleep(Duration::from_millis(200));
+        be.resume().expect("the decoder is really there to wake");
+        // Past the position interval, so the app has already been told the song
+        // is playing again, and inside the grace window.
+        let woken = pump(&mut be, 300);
+        assert!(
+            !positions(&woken).is_empty(),
+            "the resume looked like a resume: {woken:?}"
+        );
+        std::fs::write(player.dir.join("go"), b"").expect("marker");
+        let events = pump(&mut be, 300);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PlayerEvent::EndedWhilePaused { track_id: 1, .. })),
+            "a wake nobody heard does not advance the run: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, PlayerEvent::Finished { .. } | PlayerEvent::Failed { .. })),
+            "and it is not an end of the track: {events:?}"
+        );
+        be.stop();
         player.cleanup();
     }
 }

@@ -51,6 +51,34 @@ playback semantics are fixed by `docs/adr/0002-sort-and-artist-run.md`.
 
 ### Fixed
 
+* **macOS: pausing leaked a blip of music, and unpausing often started the next
+  song.** Both were the player, not the reducer: `afplay` — the only decoder a
+  stock macOS has — hands its samples to `coreaudiod`, so `SIGSTOP` froze the
+  process while the audio it had already queued carried on playing out of the
+  server's buffers (the short blip a few seconds after `Space`), and the queue it
+  was feeding finished or was dropped behind the stop, so the process exited the
+  moment `SIGCONT` woke it. The application had just been told the song was
+  playing again, so that exit read as an ordinary end of track and the artist run
+  walked on. `PlayerSpec` now carries a **pause mode**: `afplay` is
+  `PauseMode::Kill`, paused by killing the decoder (nothing is left that can make
+  a sound) and resumed by launching it again. `afplay` also has no start-position
+  switch — `-t` is a *stop* time, and the `-a` the backend was passing did not
+  exist, which made every respawn (volume, seek) exit with a usage error — so a
+  resume comes back from the beginning, says `afplay has no mid-song resume: it
+  starts again from the beginning`, and the app says the same when it starts up;
+  `mpv`/`ffplay` keep the signal pause and resume mid-sample. For those, a wake-up
+  that dies inside `RESUME_GRACE` (750 ms) now also ends the pause rather than the
+  run, because a position event is only the app's own clock and proves nothing was
+  audible. Tests: `tests/afplay_pause.rs` (real loop, real worker, real process
+  with an `afplay`-shaped spec) plus four process-level cases in
+  `src/audio/command_backend.rs`.
+* **A resize mid-draw could paint outside the screen.** `state.areas` describes
+  the size the state was last told about, which is one tick behind the frame after
+  a real resize; the scrollbar, which positions its own cells, wrote past the
+  bottom of the buffer (visible as a torn screen, and as a panic in the headless
+  harness). Every area is now clipped to the frame it is given
+  (`ui::render::a_stale_layout_stays_inside_the_frame_it_is_given`).
+
 * **`Space` after a long pause brings back the paused song instead of the next
   one** (`mutu-1sg`, `mutu-nb3`, and the report that outlived both of them).
   `SIGSTOP` stops a player process but not the clock it measures itself against,

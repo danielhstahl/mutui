@@ -15,7 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub use command_backend::{CommandBackend, KNOWN_PLAYERS, PlayerSpec, detect_backend};
+pub use command_backend::{
+    CommandBackend, KNOWN_PLAYERS, PauseMode, PlayerSpec, SeekArg, VolumeArg, detect_backend,
+};
+pub use command_backend::{POSITION_INTERVAL, RESUME_GRACE};
 pub use mock::{MockBackend, MockHandle};
 pub use null::NullBackend;
 

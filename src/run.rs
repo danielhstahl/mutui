@@ -34,13 +34,10 @@ pub fn make_backend(kind: &str) -> (BoxedBackend, Option<String>) {
             (Box::new(backend), None)
         }
         "command" => match detect_backend() {
-            Some(spec) => {
-                let label = spec.label.to_string();
-                (
-                    Box::new(CommandBackend::new(spec)),
-                    Some(format!("output: {label}")),
-                )
-            }
+            Some(spec) => (
+                Box::new(CommandBackend::new(spec.clone())),
+                Some(backend_note(&spec)),
+            ),
             None => (
                 Box::new(NullBackend::new()),
                 Some(format!(
@@ -52,13 +49,10 @@ pub fn make_backend(kind: &str) -> (BoxedBackend, Option<String>) {
         // "auto": external player when one exists, otherwise the silent backend
         // so the UI stays fully usable (and testable) on headless machines.
         _ => match detect_backend() {
-            Some(spec) => {
-                let label = spec.label.to_string();
-                (
-                    Box::new(CommandBackend::new(spec)),
-                    Some(format!("output: {label}")),
-                )
-            }
+            Some(spec) => (
+                Box::new(CommandBackend::new(spec.clone())),
+                Some(backend_note(&spec)),
+            ),
             None => (
                 Box::new(NullBackend::new()),
                 Some(format!(
@@ -68,6 +62,22 @@ pub fn make_backend(kind: &str) -> (BoxedBackend, Option<String>) {
             ),
         },
     }
+}
+
+/// The footer's first words about the chosen player.
+///
+/// A `Kill` player without a start-position switch (`afplay` on a stock macOS)
+/// is the one case where `Space` cannot bring the song back where it stopped;
+/// the user learns that when the library loads rather than from a surprise.
+fn backend_note(spec: &crate::audio::PlayerSpec) -> String {
+    use crate::audio::{PauseMode, SeekArg};
+    if spec.pause == PauseMode::Kill && spec.seek == SeekArg::None {
+        return format!(
+            "output: {} — it cannot pause mid-song (install mpv or ffplay for that)",
+            spec.label
+        );
+    }
+    format!("output: {}", spec.label)
 }
 
 /// Runs the scanner on worker threads and owns the plumbing the loop reads.

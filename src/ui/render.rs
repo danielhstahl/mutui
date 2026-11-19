@@ -11,7 +11,7 @@ use ratatui::widgets::{
 use crate::app::state::AppState;
 
 use super::palette;
-use super::{footer, list};
+use super::{Areas, footer, list};
 
 /// Every key binding, also used by `--help`.
 pub const KEY_BINDINGS: &[(&str, &str)] = &[
@@ -32,8 +32,19 @@ pub const KEY_BINDINGS: &[(&str, &str)] = &[
 ];
 
 /// Render the whole screen.
+///
+/// `state.areas` describes the last size the state was told about, which can be
+/// one tick behind the frame we are handed (the terminal resized and the resize
+/// message has not been reduced yet). Every area is therefore clipped to the
+/// frame: a stale one must not paint outside it, which is at best a corrupt
+/// screen and, with the scrollbar, a panic out of ratatui.
 pub fn draw(frame: &mut Frame, state: &AppState) {
-    let areas = state.areas;
+    let window = frame.area();
+    let areas = Areas {
+        list: state.areas.list.intersection(window),
+        gutter: state.areas.gutter.intersection(window),
+        footer: state.areas.footer.intersection(window),
+    };
     if areas.list.height > 0 {
         list::render(frame, areas.list, state);
         draw_scrollbar(frame, areas.gutter, state);
@@ -42,7 +53,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         footer::render(frame, areas.footer, state);
     }
     if state.show_help {
-        draw_help(frame, frame.area(), state);
+        draw_help(frame, window, state);
     }
 }
 
@@ -182,6 +193,25 @@ mod tests {
         assert_eq!(lines.len(), 12);
         let joined = lines.join("\n");
         insta::assert_snapshot!(joined);
+    }
+
+    /// A resize reaches the reducer one tick after the terminal changed, so the
+    /// frame and `state.areas` can disagree. Drawing the stale layout used to
+    /// write past the bottom of the buffer — a panic in a test harness, a torn
+    /// screen in a terminal.
+    #[test]
+    fn a_stale_layout_stays_inside_the_frame_it_is_given() {
+        let app = state(4, 80, 24);
+        for (width, height) in [(100u16, 14u16), (60, 14), (40, 30)] {
+            let lines = render_lines(&app, width, height);
+            assert_eq!(lines.len(), usize::from(height), "{width}x{height}");
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| line.chars().count() <= usize::from(width)),
+                "{width}x{height}: {lines:?}"
+            );
+        }
     }
 
     /// `(symbol, foreground)` for every cell: the colour-aware twin of
